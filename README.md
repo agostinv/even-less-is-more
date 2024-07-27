@@ -46,6 +46,15 @@ conda activate less
 cd src
 ```
 
+Alternatively, assuming a mostly otherwise set up environment (e.g. CUDA, OpenSSL, etc.), set up a Python3 virtual environment as follows:
+
+```bash
+python3 -m venv new-venv
+source new-venv/bin/activate
+pip3 install -r requirements.txt
+cd src
+```
+
 #### Training
 
 Example training scripts can be found in `src/example_scripts/train`. For instance, to train LESS for Llama 2 7B with 5% H2O, run
@@ -60,12 +69,12 @@ Similarly, to train LESS for Falcon 7B with 10% H2O, run:
 sh example_scripts/train/falcon_7b/falcon_7b_h2o.sh
 ```
 
-These scripts will train LESS on a single device sequentially. As desribed in our paper, LESS is trained separately and independently for each attention layer, so training can be easily parallelized on multiple devices by distributing a model's layers on different devices. The arguments `--from_layer` and `--to_layer` for training can be useful for this. 
+These scripts will train LESS on a single device sequentially. As desribed in their paper, LESS is trained separately and independently for each attention layer, so training can be easily parallelized on multiple devices by distributing a model's layers on different devices. The arguments `--from_layer` and `--to_layer` for training can be useful for this. 
 
 
 #### Evaluation
 
-This section provides details on evaluating the performance of LESS and its benchmarks. Example training scripts can be found in `src/example_scripts/eval`. Following the structure of experiments in the [H2O repository](https://github.com/FMInference/H2O/tree/main), we make the distinction between generation and non-generation (parallel) tasks. More details can be found in the paper. The implementations of LESS and baselines will differ for both. 
+This section provides details on evaluating the performance of LESS and its benchmarks. Example training scripts can be found in `src/example_scripts/eval`. Following the structure of experiments in the [H2O repository](https://github.com/FMInference/H2O/tree/main), they make a distinction between generation and non-generation (parallel) tasks. More details can be found in the original paper. The implementations of LESS and baselines will differ for both. 
 
 To evaluate your trained LESS for Llama 2 7B on WikiText (parallel), run 
 
@@ -80,12 +89,12 @@ sh example_scripts/eval/llama2_7b/cnn_dailymail.sh
 ```
 and similarly for other summarization datasets.
 
-<!-- We have also provided trained LESS kernels for Llama 2 7B with 5% H2O in `checkpoints/llama2_7b_less_5_h2o`. Simply replace the original argument `--saved_model_name` with "llama2_7b_less_5_h2o" in `example_scripts/eval/llama2_7b/wikitext.sh` and `example_scripts/eval/llama2_7b/cnn_dailymail.sh` before running the above evaluation examples. -->
+<!-- They have also provided trained LESS kernels for Llama 2 7B with 5% H2O in `checkpoints/llama2_7b_less_5_h2o`. Simply replace the original argument `--saved_model_name` with "llama2_7b_less_5_h2o" in `example_scripts/eval/llama2_7b/wikitext.sh` and `example_scripts/eval/llama2_7b/cnn_dailymail.sh` before running the above evaluation examples. -->
 
 
 ### Citation
 
-If you found this repository helpful in your work, please cite our [paper](https://arxiv.org/abs/2402.09398):
+If you found this repository helpful in your work, please cite the original [paper](https://arxiv.org/abs/2402.09398):
 
     @misc{dong2024less,
       title={Get More with LESS: Synthesizing Recurrence with KV Cache Compression for Efficient LLM Inference}, 
