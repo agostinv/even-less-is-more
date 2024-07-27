@@ -1,15 +1,36 @@
-# LESS
+# Even-LESS is More!
 
-This repository contains the implementation of LESS (**L**ow-rank **E**mbedding **S**idekick with **S**parse policy), presented in ["Get More with LESS: Synthesizing Recurrence with KV Cache Compression for Efficient LLM Inference"](https://arxiv.org/abs/2402.09398)
+Project based on LESS from ICML '24, which augments LLMs with a small fine-tuning flow to provide a constant memory footprint. Their proposed approach is valid for any "memory eviction policy" in the KV cache, although they primarily use H2O from NeurIPS '23. 
 
+Their global cache is a form of linear attention, where the softmax operator is replaced with some arbitrary, decomposable set of function maps/kernels. This allows for, at a high level, Q(K^TV) which is O(n) versus (QK^T)V which is O(n^2). 
 
-Harry Dong, Xinyu Yang, Zhenyu Zhang, Zhangyang (Atlas) Wang, Yuejie Chi, Beidi Chen
+## Room for Improvement with Even Less?
 
+#### Linear Attention Gating/Decay
 
-### Abstract
+A few areas leap out for improvement. First, and foremost, their global cache is a naive "value mush" with no way to modify itself. The creators of LESS appeared to not know how to parallelize their cache construction when it needs to be modified at a per time-step basis, but in reality it should be relatively simple for all but the most data-dependent of gating functions/decay factors.
 
-Many computational factors limit broader deployment of large language models. In this paper, we focus on a memory bottleneck imposed by the key-value (KV) cache, a computational shortcut that requires storing previous KV pairs during decoding. While existing KV cache methods approach this problem by pruning or evicting large swaths of relatively less important KV pairs to dramatically reduce the memory footprint of the cache, they can have limited success in tasks that require recollecting a majority of previous tokens. To alleviate this issue, we propose LESS, a simple integration of a (nearly free) constant sized cache with eviction-based cache methods, such that all tokens can be queried at later decoding steps. Its ability to retain information throughout time shows merit on a variety of tasks where we demonstrate LESS can help reduce the performance gap from caching everything, sometimes even matching it, all while being efficient.
+Any function producing a scalar G that gates the KV cache updates in some fashion and decays it can be trivially be shown to be equivalent to a modified ALiBi-like structure, where G is placed in a mask with each i and j defining a G value as G^(-1(j-i)). This also applies even if G is time-dependent, e.g. some arbitrary G\_t.
 
+Truly data-dependent G (e.g. some d x d matrix for elementwise application to K^TV) is much harder to parallelize but can be somewhat parallelized via Flash Linear Attention-like techniques.
+
+#### Linear Attention Feature Maps
+
+The LESS implementation calls for a small MLP network that functions as a "feature map" of sorts in classical linear attention. This is NOT NORMAL, even if it might work fine in practice. They tried using Performer-based maps, but other options have been recently proposed (see Dijiang, an ICML '24 oral on efficient LLMs that uses a DCT-based map). LESS adds parameters to the model to produce its feature maps, a counter-intuitive augmentation given the goal of memory footprint reduction.
+
+The goal is an almost in-place drop-in for softmax, so the feature map shouldn't be arbitrary. There needs to be at least some mathematical basis for softmax approximation from our perspective. Given that, Dijiang is an obviou option. The Taylor series approximation of BASED is another option. 
+
+#### Linear Attention Re-Weighting
+
+Some works, including LeaPformer from ICML '24, demonstrated improvements can be observed from some elementwise transforms applied to the query and key matrices. Simple options here are trivial to test. 
+
+#### Replacing K^TV Denominator with LayerNorm
+
+In an ACL '22 work it was demonstrated that linear attention has unbounded gradients. While this replacement doesn't necessarily lead to a practical improvement, it is a principled change.
+
+#### QAT-like Robustness Training
+
+LESS proposes only training the feature maps on a per-layer basis to minimize the memory footprint of the model as it's being trained, thus improving accessibility. An optional improvement would likely be layer-by-layer training, inspired by QAT approaches. This is probably complementary to their existing approach, which seeks to minimize layer-by-layer outputs in an incremental manner. Instead, a QAT augmentation would progressively freeze layers while training on model output reconstruction.
 
 ### Usage
 
