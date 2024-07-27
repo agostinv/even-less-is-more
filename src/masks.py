@@ -67,3 +67,27 @@ def get_A_mask(attn_weights, heavy_budget, recent_budget):
     A_mask[..., :heavy_budget] = 1
     A_mask = torch.tril(A_mask, diagonal=0)
     return A_mask
+
+'''
+    Series of simple mask construction for global cache decay based on
+    constant or time-dependent scalar decay values. Intended to be applied
+    during training when an N x N matrix is being constructed anyways for the
+    attention portion modeling inference sparsity.
+'''
+
+# assume purely causal architecture, of course
+# assumes that lambda_val ranges from [0, 1]
+def get_lambda_mask(attn_weights, lambda_val: float):
+    len = attn_weights.size(0)
+    lambda_mask = torch.arange(len).unsqueeze(0) - torch.arange(len).unsqueeze(1)
+    lambda_mask = torch.tril(lambda_mask, diagonal=0)
+    lambda_mask = lambda_val ** lambda_mask
+    return lambda_mask
+
+# lambda_t_val MUST be broadcastable, i.e. it must be N x 1
+def get_lambda_t_mask(attn_weights, lambda_t_val: torch.Tensor):
+    len = attn_weights.size(0)
+    lambda_mask = torch.tril(torch.ones(len, len), diagonal=0)
+    lambda_t_val = lambda_t_val.unsqueeze(0).expand(len, len)
+    lambda_mask = torch.cumprod(lambda_mask * lambda_t_val, dim=1)
+    return lambda_mask
