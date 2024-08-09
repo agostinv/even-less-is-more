@@ -3,6 +3,7 @@ import sys
 import argparse
 import numpy as np
 import random
+import gc
 from data_processing import get_c4, get_wikitext2
 from annotated_models.llama import get_annotated_llama
 from annotated_models.falcon import get_annotated_falcon
@@ -154,7 +155,7 @@ def A_attn_out(config, q, k, v, attn_weights, heavy_budget, recent_budget, multi
 def h2o_attn_weights(attn_weights, heavy_budget, recent_budget, multi_query):
     attn_mask = get_h2o_mask(attn_weights, heavy_budget, recent_budget, multi_query=multi_query)
     attn_weights = (attn_weights * attn_mask) + ((~attn_mask) * torch.finfo(attn_weights.dtype).min)
-    print(attn_mask.shape)
+    #print(attn_mask.shape)
     return attn_weights, torch.logsumexp(attn_weights, -1, keepdim=True), attn_mask
 
 def A_attn_weights(attn_weights, heavy_budget, recent_budget):
@@ -469,7 +470,14 @@ if __name__ == '__main__':
         torch.cuda.empty_cache()
 
         samples = len(qs)        
-        
+
+        # attempt to reduce size of batches, need to test against baseline
+        if args.half_precision:
+            qs.half()
+            ks.half()
+            vs.half()
+            os_.half()
+
         train_data = QKVODataset(qs[:int(0.9 * samples)], ks[:int(0.9 * samples)], vs[:int(0.9 * samples)], os_[:int(0.9 * samples)])
         val_data = QKVODataset(qs[int(0.9 * samples):], ks[int(0.9 * samples):], vs[int(0.9 * samples):], os_[int(0.9 * samples):])
         print("Train samples:", len(train_data), " Val samples:", len(val_data))
@@ -481,6 +489,10 @@ if __name__ == '__main__':
         net.to(device).float()
 
         o_proj = o_proj_dict[model_name](l).float().to(device)
+        if args.half_precision:
+            o_proj.half()
+            #o_proj_module = o_proj_dict[model_name](l)
+            #o_proj_module = o_proj_module.half()
         
         optimizer = optim.Adam(net.parameters(), lr=lr)
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
@@ -534,9 +546,9 @@ if __name__ == '__main__':
                 f'{save_dir}/layer_{li}.pth')
             
                 net = net.to(device)
-        
-        if args.half_precision:
 
-            o_proj_module = o_proj_dict[model_name](l)
-            o_proj_module = o_proj_module.half()
+        # forceful attempt at garbage collection to manage memory consumption
+        del qs, ks, vs, os_
+        torch.cuda.empty_cache()
+        gc.collect()
         
