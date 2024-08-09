@@ -1,7 +1,16 @@
-save_dir=llama2_7b_h2o
+#!/bin/bash
 
-python train_kernels.py \
-    --save_dir ../checkpoints/$save_dir \
+save_dir=llama2_7b_h2o
+root=<PATH_TO_ROOT>
+
+cd ${root}
+source ${root}/../less-venv/bin/activate
+
+export HUGGINGFACE_HUB_CACHE="${root}/.cache"
+export HF_DATASETS_CACHE="${root}/.cache/datasets"
+
+python ${root}/src/train_kernels.py \
+    --save_dir ${root}/checkpoints/$save_dir \
     --model_name llama2 \
     --model_size 0 \
     --sampling_batch_size 2 \
@@ -14,4 +23,4 @@ python train_kernels.py \
     --lr 0.001 \
     --batch_size 2 \
     --epochs 40 \
-    --device cuda:0
+    --device cuda:0 \
