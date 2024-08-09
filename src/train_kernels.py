@@ -360,6 +360,8 @@ if __name__ == '__main__':
     parser.add_argument('--from_layer', type=int, default=0)
     parser.add_argument('--to_layer', type=int, default=9999)
 
+    parser.add_argument('--debug', action='store_true') # for wikitext versus c4 loading
+
 
     args = parser.parse_args()
 
@@ -386,7 +388,8 @@ if __name__ == '__main__':
     layer_start = args.from_layer
     layer_end = args.to_layer
     
-    
+    debug = args.debug   
+ 
     device = args.device
 
     assert heavy_ratio >= 0 and heavy_ratio <= 1 and recent_ratio >= 0 and recent_ratio <= 1
@@ -415,10 +418,11 @@ if __name__ == '__main__':
     if seq_len == -1:
         seq_len = config.max_position_embeddings
 
-    trainloader = get_c4(nsamples=batches_to_collect, seed=0, seqlen=seq_len, tokenizer=tokenizer, batch_size=sampling_batch_size)
-    
     # debugging is faster with wt
-    # trainloader = get_wikitext2(nsamples=batches_to_collect, seed=0, seqlen=seq_len, tokenizer=tokenizer, batch_size=sampling_batch_size)
+    if not debug:
+        trainloader = get_c4(nsamples=batches_to_collect, seed=0, seqlen=seq_len, tokenizer=tokenizer, batch_size=sampling_batch_size)
+    else:
+        trainloader = get_wikitext2(nsamples=batches_to_collect, seed=0, seqlen=seq_len, tokenizer=tokenizer, batch_size=sampling_batch_size)
     
     model = annotated_functions[model_name](model,[i for i in range(layer_start, layer_end)])
 
@@ -489,8 +493,8 @@ if __name__ == '__main__':
         net.to(device).float()
 
         o_proj = o_proj_dict[model_name](l).float().to(device)
-        if args.half_precision:
-            o_proj.half()
+        #if args.half_precision:
+            #o_proj.half()
             #o_proj_module = o_proj_dict[model_name](l)
             #o_proj_module = o_proj_module.half()
         

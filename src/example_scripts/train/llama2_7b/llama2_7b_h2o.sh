@@ -1,10 +1,10 @@
 #!/bin/bash
 
 save_dir=llama2_7b_h2o
-root=<PATH_TO_ROOT>
+root=/people/agos983/even-less-is-more/
 
 cd ${root}
-source ${root}/../less-venv/bin/activate
+source ${root}/../test-venv/bin/activate
 
 export HUGGINGFACE_HUB_CACHE="${root}/.cache"
 export HF_DATASETS_CACHE="${root}/.cache/datasets"
@@ -24,3 +24,4 @@ python ${root}/src/train_kernels.py \
     --batch_size 2 \
     --epochs 40 \
     --device cuda:0 \
+    --debug \
