@@ -3,6 +3,7 @@ import sys
 import argparse
 import numpy as np
 import random
+import gc
 from data_processing import get_c4, get_wikitext2
 from annotated_models.llama import get_annotated_llama
 from annotated_models.falcon import get_annotated_falcon
@@ -13,6 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import optim
 from torch.utils.data import Dataset
+from utils.train_utils import *
 
 import math
 from tqdm import tqdm
@@ -58,110 +60,6 @@ mq_models = ['falcon']
 criterion_mse = torch.nn.MSELoss()
 scaler = torch.cuda.amp.GradScaler()
 
-def get_activations_layer(model, layer, dataloader, batches):
-    '''
-    Collet Q, K, V, and O for a particular layer across a number of batches.
-    '''
-    model.eval() 
-    qs_all = []
-    ks_all = []
-    vs_all = []
-    os_all = []
-    
-    for i, (inputs, labels) in enumerate(dataloader):
-        if i == batches:
-            break
-        print(f'Layer {layer}, collecting batch {i+1} / {batches}')
-        
-        with torch.inference_mode(): 
-            
-            inputs = inputs.to(model.model.device)
-            outputs, batch_int_values = model(inputs)
-            qs_all.append(batch_int_values[layer]['Q'])
-            ks_all.append(batch_int_values[layer]['K'])
-            vs_all.append(batch_int_values[layer]['V'])
-            os_all.append(batch_int_values[layer]['O'])
-            
-        del inputs, labels, outputs
-        torch.cuda.empty_cache()
-
-    qs_all = torch.cat(qs_all).transpose(1, 2).flatten(2)
-    ks_all = torch.cat(ks_all).transpose(1, 2).flatten(2)
-    vs_all = torch.cat(vs_all).transpose(1, 2).flatten(2)
-    os_all = torch.cat(os_all)
-
-    datasize = (sys.getsizeof(qs_all.storage()) + sys.getsizeof(ks_all.storage()) + sys.getsizeof(vs_all.storage()) + sys.getsizeof(os_all.storage())) / 1024**3
-    print('Data size: {:.3f}GB'.format(datasize))
-
-    rand_perm = torch.randperm(len(qs_all))
-    qs_all = qs_all[rand_perm]
-    ks_all = ks_all[rand_perm]
-    vs_all = vs_all[rand_perm]
-    os_all = os_all[rand_perm]
-    return qs_all, ks_all, vs_all, os_all
-
-
-class QKVODataset(Dataset):
-    '''
-    Simple PyTorch dataset of Q, K, V, and O.
-    '''
-    def __init__(self, Q, K, V, O):
-        self.Q = Q
-        self.K = K
-        self.V = V
-        self.O = O
-
-    def __len__(self):
-        return len(self.Q)
-
-    def __getitem__(self, idx):
-        return self.Q[idx].float(), self.K[idx].float(), self.V[idx].float(), self.O[idx].float()
-
-def get_target_attn(config, q, k, attn_mask):
-    target_attn = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(config.hidden_size // config.num_attention_heads)
-    
-    attn_weights = (attn_mask * target_attn) + ((~attn_mask) * torch.finfo(target_attn.dtype).min)
-    target_attn = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
-    return target_attn, attn_weights
-
-def get_target_attn_out(config, q, k, v, attn_mask, multi_query):
-    B, S, D = q.shape
-    q = q.reshape(B, S, config.num_attention_heads, D // config.num_attention_heads).transpose(1, 2)
-    if not multi_query:
-        k = k.reshape(B, S, config.num_attention_heads, D // config.num_attention_heads).transpose(1, 2)
-        v = v.reshape(B, S, config.num_attention_heads, D // config.num_attention_heads).transpose(1, 2)
-    else:
-        k = k.unsqueeze(1)
-        v = v.unsqueeze(1)
-    
-    attn, attn_weights = get_target_attn(config, q, k, attn_mask)
-    
-    out = torch.matmul(attn, v)
-    out = out.transpose(1, 2).flatten(2)
-    return out, attn, attn_weights
-
-def h2o_attn_out(config, q, k, v, attn_weights, heavy_budget, recent_budget, multi_query):
-    attn_mask = get_h2o_mask(attn_weights, heavy_budget, recent_budget, multi_query=multi_query)
-    out, _, attn_weights = get_target_attn_out(config, q, k, v, attn_mask,  multi_query=multi_query)
-    return out, torch.logsumexp(attn_weights, -1, keepdim=True), attn_mask
-
-def A_attn_out(config, q, k, v, attn_weights, heavy_budget, recent_budget, multi_query):
-    attn_mask = get_A_mask(attn_weights, heavy_budget, recent_budget)
-    out, _, attn_weights = get_target_attn_out(config, q, k, v, attn_mask, multi_query=multi_query)
-    return out, torch.logsumexp(attn_weights, -1, keepdim=True), attn_mask
-
-
-def h2o_attn_weights(attn_weights, heavy_budget, recent_budget, multi_query):
-    attn_mask = get_h2o_mask(attn_weights, heavy_budget, recent_budget, multi_query=multi_query)
-    attn_weights = (attn_weights * attn_mask) + ((~attn_mask) * torch.finfo(attn_weights.dtype).min)
-    print(attn_mask.shape)
-    return attn_weights, torch.logsumexp(attn_weights, -1, keepdim=True), attn_mask
-
-def A_attn_weights(attn_weights, heavy_budget, recent_budget):
-    attn_mask = get_A_mask(attn_weights, heavy_budget, recent_budget)
-    attn_weights = (attn_weights * attn_mask) + ((~attn_mask) * torch.finfo(attn_weights.dtype).min)
-    return attn_weights, torch.logsumexp(attn_weights, -1, keepdim=True), attn_mask
-    
 
 def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query):
     net.train()
@@ -359,6 +257,8 @@ if __name__ == '__main__':
     parser.add_argument('--from_layer', type=int, default=0)
     parser.add_argument('--to_layer', type=int, default=9999)
 
+    parser.add_argument('--debug', action='store_true') # for wikitext versus c4 loading
+
 
     args = parser.parse_args()
 
@@ -385,7 +285,8 @@ if __name__ == '__main__':
     layer_start = args.from_layer
     layer_end = args.to_layer
     
-    
+    debug = args.debug   
+ 
     device = args.device
 
     assert heavy_ratio >= 0 and heavy_ratio <= 1 and recent_ratio >= 0 and recent_ratio <= 1
@@ -414,10 +315,11 @@ if __name__ == '__main__':
     if seq_len == -1:
         seq_len = config.max_position_embeddings
 
-    trainloader = get_c4(nsamples=batches_to_collect, seed=0, seqlen=seq_len, tokenizer=tokenizer, batch_size=sampling_batch_size)
-    
     # debugging is faster with wt
-    # trainloader = get_wikitext2(nsamples=batches_to_collect, seed=0, seqlen=seq_len, tokenizer=tokenizer, batch_size=sampling_batch_size)
+    if not debug:
+        trainloader = get_c4(nsamples=batches_to_collect, seed=0, seqlen=seq_len, tokenizer=tokenizer, batch_size=sampling_batch_size)
+    else:
+        trainloader = get_wikitext2(nsamples=batches_to_collect, seed=0, seqlen=seq_len, tokenizer=tokenizer, batch_size=sampling_batch_size)
     
     model = annotated_functions[model_name](model,[i for i in range(layer_start, layer_end)])
 
@@ -469,7 +371,14 @@ if __name__ == '__main__':
         torch.cuda.empty_cache()
 
         samples = len(qs)        
-        
+
+        # attempt to reduce size of batches, need to test against baseline
+        if args.half_precision:
+            qs.half()
+            ks.half()
+            vs.half()
+            os_.half()
+
         train_data = QKVODataset(qs[:int(0.9 * samples)], ks[:int(0.9 * samples)], vs[:int(0.9 * samples)], os_[:int(0.9 * samples)])
         val_data = QKVODataset(qs[int(0.9 * samples):], ks[int(0.9 * samples):], vs[int(0.9 * samples):], os_[int(0.9 * samples):])
         print("Train samples:", len(train_data), " Val samples:", len(val_data))
@@ -481,11 +390,16 @@ if __name__ == '__main__':
         net.to(device).float()
 
         o_proj = o_proj_dict[model_name](l).float().to(device)
+        #if args.half_precision:
+            #o_proj.half()
+            #o_proj_module = o_proj_dict[model_name](l)
+            #o_proj_module = o_proj_module.half()
         
         optimizer = optim.Adam(net.parameters(), lr=lr)
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
         best = float('inf')
         for epoch in tqdm(range(epochs)):
+        #for epoch in tqdm(range(2)):
             train_loss = train(
                 net, 
                 config, 
@@ -534,9 +448,13 @@ if __name__ == '__main__':
                 f'{save_dir}/layer_{li}.pth')
             
                 net = net.to(device)
-        
-        if args.half_precision:
 
+        if args.half_precision:
             o_proj_module = o_proj_dict[model_name](l)
             o_proj_module = o_proj_module.half()
+        
+        # forceful attempt at garbage collection to manage memory consumption
+        del qs, ks, vs, os_
+        torch.cuda.empty_cache()
+        gc.collect()
         

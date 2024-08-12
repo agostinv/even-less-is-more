@@ -67,3 +67,109 @@ def get_A_mask(attn_weights, heavy_budget, recent_budget):
     A_mask[..., :heavy_budget] = 1
     A_mask = torch.tril(A_mask, diagonal=0)
     return A_mask
+
+'''
+    Series of simple mask construction for global cache decay based on
+    constant or time-dependent scalar decay values. Intended to be applied
+    during training when an N x N matrix is being constructed anyways for the
+    attention portion modeling inference sparsity.
+
+    These only work for actual, consistent progression across time. Not 
+    functional for dynamic sparsity, but present as a reference.
+'''
+
+# assume purely causal architecture, of course
+# assumes that lambda_val ranges from [0, 1]
+def get_lambda_mask_nosparse(attn_weights, lambda_val: float):
+    len = attn_weights.size(0)
+    lambda_mask = torch.arange(len).unsqueeze(0) - torch.arange(len).unsqueeze(1)
+    lambda_mask = torch.tril(lambda_mask, diagonal=0)
+    lambda_mask = lambda_val ** lambda_mask
+    return lambda_mask
+
+# lambda_t_val MUST be broadcastable, i.e. it must be N x 1
+def get_lambda_t_mask_nosparse(attn_weights, lambda_t_val: torch.Tensor):
+    len = attn_weights.size(0)
+    lambda_mask = torch.tril(torch.ones(len, len), diagonal=0)
+    lambda_t_val = lambda_t_val.unsqueeze(0).expand(len, len)
+    lambda_mask = torch.cumprod(lambda_mask * lambda_t_val, dim=1)
+    return lambda_mask
+
+
+'''
+    What is actually required is a parallelizable method of modeling WHEN states
+    are added to the local cache, at which point we want to apply decay to ALL previous
+    states. One thought is shifting!
+
+    Example below provides basic idea with an inverted, dynamic map (~sparse_map). When a
+    bit flips it represents ejection. Note that end product is lower_tril * (~sparse_map)
+    so no need to worry about upper triangular portion. Afterward, we XOR to produce...
+
+    e.g.  #############     #############       ############# 
+          # 0 - - - - #     # 0 - - - - #  XOR  # 0 - - - - #
+          # 1 0 - - - #  => # 0 0 - - - #   =>  # 1 0 - - - #
+          # 1 0 0 - - #     # 1 0 0 - - #       # 0 0 0 - - #
+          # 1 0 1 0 - #     # 1 0 0 0 - #       # 0 0 1 0 - #
+          # 1 0 1 0 0 #     # 1 0 1 0 0 #       # 0 0 0 0 0 #
+          #############     #############       #############
+
+    From here, we can sum and multiply the output by some constant lambda and elementwise 
+    multiply with the first mask. This produces the following with `g` representing our 
+    constant lambda.
+
+    e.g. #############     #####     #####         #############
+         # 0 - - - - #     # 0 #     # 0 #  mult   # 0 - - - - #
+         # 1 0 - - - #  => # 1 #  => # g #  =>     # g 0 - - - #
+         # 0 0 0 - - #     # 0 #     # 0 #         # 1 0 0 - - #
+         # 0 0 1 0 - #     # 1 #     # g #         # g 0 g 0 - #
+         # 0 0 0 0 0 #     # 0 #     # 0 #         # 1 0 1 0 0 #
+         #############     #####     #####         #############
+
+    This produces a matrix that we can then simply cumprod across the key dimension to get 
+    something close to what we want. Dividing it by `g` results in exact inference behavior!
+    `h` represents g^2 to maintain "prettiness" here.
+
+    e.g. #############           #############            #############
+         # 0 - - - - #           # 0 - - - - #            # 0 - - - - #
+         # g 0 - - - #  cumprod  # g 0 - - - #   divide   # 1 0 - - - #
+         # 1 0 0 - - #    =>     # g 0 0 - - #      =>    # 1 0 0 - - #
+         # g 0 g 0 - #           # h 0 g 0 - #            # g 0 1 0 - #
+         # 1 0 1 0 0 #           # h 0 g 0 0 #            # g 0 1 0 0 #
+         #############           #############            #############
+
+         
+    This also makes a time-dependent version somewhat easier, but still not
+    trivial to execute on. The first non-zero value in the row-wise sum intermediate 
+    matrix up above represents the "decoding" time-step that triggers the cache eviction. 
+    That means that any map of time-dependent lambda_t values can be masked up to that time-step.
+    At that point, instead of naively masking by `g` we can multiply by the masked_lambda_t values
+    (may have to transpose or something for the keys?). 
+
+    TODO: some time-dependent implementation
+    
+''' 
+
+# currently also takes care of tril mask behavior, may be unnecessary and should be tested
+# as it is inefficient to constantly use it
+def get_lambda_mask_sparse(attn_mask, sparse_mask, lambda_val: float):
+    len = sparse_mask.size(0)
+    shifted_down_sparse_mask = torch.zeros_like(sparse_mask)
+    shifted_down_sparse_mask[1:, :] = sparse_mask[:-1, :]
+
+    # note: non-zeros are all True, only zeros are False as baseline before xor
+    #       need to add back identity matrix to account for missing diagonal
+    xor_sparse_mask = torch.logical_xor(
+                        sparse_mask.to(torch.int),
+                        shifted_down_sparse_mask.to(torch.int), 
+                      ).to(torch.int)
+
+    evict_triggered = lambda_val * torch.sum(xor_sparse_mask, dim=-1).unsqueeze(-1)
+    lambda_mask = evict_triggered * sparse_mask
+
+    # need to switch zeros to ones for cumprod then switch back before dividing out a
+    # lambda_val to respect initial evictions
+    lambda_mask[lambda_mask == 0] = 1
+    lambda_mask = torch.cumprod(lambda_mask, dim=0)
+    lambda_mask[lambda_mask == 1]  = 0
+
+    return lambda_mask / lambda_val
