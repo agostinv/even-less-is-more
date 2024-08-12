@@ -7,11 +7,62 @@ from transformers import set_seed, AutoTokenizer, AutoModelForCausalLM
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
-from train_utils.utils import *
+import random
 
 import math
 
-def get_activations_layer(model, layer, dataloader, batches):
+def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_heads, seq_len, head_dim, permute=True):
+    '''
+    Collect Q, K, V, and O for a particular layer across a number of batches.
+
+    This implementation permutes the data before concatenating and pre-allocates tensors to avoid
+    excessive RAM consumption.
+    '''
+
+    # dataloader should be a list based on data_processing.py
+    # permutation only intended to be turned off for tests
+    if permute:
+        random.shuffle(dataloader)
+
+    model.eval() 
+    
+    inputs, _ = next(iter(dataloader))
+    total_size = batches * bsz
+    
+    qs_all = torch.empty((total_size, num_heads, seq_len, head_dim), device=model.model.device)
+    ks_all = torch.empty((total_size, num_heads, seq_len, head_dim), device=model.model.device)
+    vs_all = torch.empty((total_size, num_heads, seq_len, head_dim), device=model.model.device)
+    os_all = torch.empty((total_size, num_heads, seq_len, head_dim), device=model.model.device)
+
+    for i, (inputs, labels) in enumerate(dataloader):
+        if i == batches:
+            break
+        print(f'Layer {layer}, collecting batch {i+1} / {batches}')
+        
+        with torch.inference_mode(): 
+            
+            inputs = inputs.to(model.model.device)
+            outputs, batch_int_values = model(inputs)
+            qs_all[i * bsz:(i + 1) * bsz, :, :, :] = batch_int_values[layer]['Q']
+            ks_all[i * bsz:(i + 1) * bsz, :, :, :] = batch_int_values[layer]['K']
+            vs_all[i * bsz:(i + 1) * bsz, :, :, :] = batch_int_values[layer]['V']
+            os_all[i * bsz:(i + 1) * bsz, :, :, :] = batch_int_values[layer]['O']
+            
+        del inputs, labels, outputs
+        torch.cuda.empty_cache()
+
+    # still have to reshape, could be done earlier but these just view the data a opposed to copying
+    qs_all = qs_all.transpose(1, 2).flatten(2)
+    ks_all = ks_all.transpose(1, 2).flatten(2)
+    vs_all = vs_all.transpose(1, 2).flatten(2)
+
+    datasize = (sys.getsizeof(qs_all.storage()) + sys.getsizeof(ks_all.storage()) + sys.getsizeof(vs_all.storage()) + sys.getsizeof(os_all.storage())) / 1024**3
+    print('Data size: {:.3f}GB'.format(datasize))
+
+    return qs_all, ks_all, vs_all, os_all
+
+# inefficient use of RAM due to torch.cat(...)
+def get_activations_layer(model, layer, dataloader, batches, permute=True):
     '''
     Collet Q, K, V, and O for a particular layer across a number of batches.
     '''
@@ -30,6 +81,7 @@ def get_activations_layer(model, layer, dataloader, batches):
             
             inputs = inputs.to(model.model.device)
             outputs, batch_int_values = model(inputs)
+            print(batch_int_values[layer]['Q'].shape)
             qs_all.append(batch_int_values[layer]['Q'])
             ks_all.append(batch_int_values[layer]['K'])
             vs_all.append(batch_int_values[layer]['V'])
@@ -39,6 +91,7 @@ def get_activations_layer(model, layer, dataloader, batches):
         torch.cuda.empty_cache()
 
     qs_all = torch.cat(qs_all).transpose(1, 2).flatten(2)
+    print(qs_all.shape)
     ks_all = torch.cat(ks_all).transpose(1, 2).flatten(2)
     vs_all = torch.cat(vs_all).transpose(1, 2).flatten(2)
     os_all = torch.cat(os_all)
@@ -46,11 +99,13 @@ def get_activations_layer(model, layer, dataloader, batches):
     datasize = (sys.getsizeof(qs_all.storage()) + sys.getsizeof(ks_all.storage()) + sys.getsizeof(vs_all.storage()) + sys.getsizeof(os_all.storage())) / 1024**3
     print('Data size: {:.3f}GB'.format(datasize))
 
-    rand_perm = torch.randperm(len(qs_all))
-    qs_all = qs_all[rand_perm]
-    ks_all = ks_all[rand_perm]
-    vs_all = vs_all[rand_perm]
-    os_all = os_all[rand_perm]
+    if permute:
+        rand_perm = torch.randperm(len(qs_all))
+        qs_all = qs_all[rand_perm]
+        ks_all = ks_all[rand_perm]
+        vs_all = vs_all[rand_perm]
+        os_all = os_all[rand_perm]
+
     return qs_all, ks_all, vs_all, os_all
 
 

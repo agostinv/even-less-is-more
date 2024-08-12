@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import optim
 from torch.utils.data import Dataset
-from train_utils.utils import *
+from utils.train_utils import *
 
 import math
 from tqdm import tqdm
