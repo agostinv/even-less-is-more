@@ -151,7 +151,7 @@ def get_lambda_t_mask_nosparse(attn_weights, lambda_t_val: torch.Tensor):
 
 # currently also takes care of tril mask behavior, may be unnecessary and should be tested
 # as it is inefficient to constantly use it
-def get_lambda_mask_sparse(attn_mask, sparse_mask, lambda_val: float):
+def get_lambda_mask_sparse(sparse_mask, lambda_val: float):
     len = sparse_mask.size(0)
     shifted_down_sparse_mask = torch.zeros_like(sparse_mask)
     shifted_down_sparse_mask[1:, :] = sparse_mask[:-1, :]

@@ -2,7 +2,7 @@ import sys
 from data_processing import get_c4, get_wikitext2
 from annotated_models.llama import get_annotated_llama
 from annotated_models.falcon import get_annotated_falcon
-from masks import get_A_mask, get_h2o_mask
+from masks import get_A_mask, get_h2o_mask, get_lambda_mask_sparse
 from transformers import set_seed, AutoTokenizer, AutoModelForCausalLM
 import torch
 import torch.nn.functional as F
@@ -159,13 +159,26 @@ def A_attn_out(config, q, k, v, attn_weights, heavy_budget, recent_budget, multi
     return out, torch.logsumexp(attn_weights, -1, keepdim=True), attn_mask
 
 
-def h2o_attn_weights(attn_weights, heavy_budget, recent_budget, multi_query):
+def h2o_attn_weights(attn_weights, heavy_budget, recent_budget, multi_query, lambda_gating, lambda_constant):
     attn_mask = get_h2o_mask(attn_weights, heavy_budget, recent_budget, multi_query=multi_query)
-    attn_weights = (attn_weights * attn_mask) + ((~attn_mask) * torch.finfo(attn_weights.dtype).min)
-    #print(attn_mask.shape)
+    
+    # addition of lambda gating-based decay for sparse mask
+    if lambda_gating == "constant":
+        sparse_mask = get_lambda_mask_sparse(attn_mask, lambda_constant)
+    elif lambda_gating == "time-dependent":
+        raise NotImplementedError("Time-dependent lambda gating not implemented yet.")
+    
+    attn_weights = (attn_weights * sparse_mask) + ((~attn_mask) * torch.finfo(attn_weights.dtype).min)
     return attn_weights, torch.logsumexp(attn_weights, -1, keepdim=True), attn_mask
 
-def A_attn_weights(attn_weights, heavy_budget, recent_budget):
+def A_attn_weights(attn_weights, heavy_budget, recent_budget, lambda_gating, lambda_constant):
     attn_mask = get_A_mask(attn_weights, heavy_budget, recent_budget)
-    attn_weights = (attn_weights * attn_mask) + ((~attn_mask) * torch.finfo(attn_weights.dtype).min)
+    
+    # addition of lambda gating-based decay for sparse mask
+    if lambda_gating == "constant":
+        sparse_mask = get_lambda_mask_sparse(attn_mask, lambda_constant)
+    elif lambda_gating == "time-dependent":
+        raise NotImplementedError("Time-dependent lambda gating not implemented yet.")
+
+    attn_weights = (attn_weights * sparse_mask) + ((~attn_mask) * torch.finfo(attn_weights.dtype).min)
     return attn_weights, torch.logsumexp(attn_weights, -1, keepdim=True), attn_mask
