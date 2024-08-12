@@ -74,8 +74,8 @@ def get_A_mask(attn_weights, heavy_budget, recent_budget):
     during training when an N x N matrix is being constructed anyways for the
     attention portion modeling inference sparsity.
 
-    These only work for actual, consistent progression across time. Not actually
-    functional for what we need, but present as a reference for the moment.
+    These only work for actual, consistent progression across time. Not 
+    functional for dynamic sparsity, but present as a reference.
 '''
 
 # assume purely causal architecture, of course
@@ -94,6 +94,7 @@ def get_lambda_t_mask_nosparse(attn_weights, lambda_t_val: torch.Tensor):
     lambda_t_val = lambda_t_val.unsqueeze(0).expand(len, len)
     lambda_mask = torch.cumprod(lambda_mask * lambda_t_val, dim=1)
     return lambda_mask
+
 
 '''
     What is actually required is a parallelizable method of modeling WHEN states
@@ -153,15 +154,22 @@ def get_lambda_t_mask_nosparse(attn_weights, lambda_t_val: torch.Tensor):
 def get_lambda_mask_sparse(attn_mask, sparse_mask, lambda_val: float):
     len = sparse_mask.size(0)
     shifted_down_sparse_mask = torch.zeros_like(sparse_mask)
-    shifted_down_sparse_mask[0:, :] = sparse_mask[:-1, :]
-
-    sparse_mask = attn_mask * sparse_mask
-    shifted_down_sparse_mask = attn_mask * shifted_down_sparse_mask
+    shifted_down_sparse_mask[1:, :] = sparse_mask[:-1, :]
 
     # note: non-zeros are all True, only zeros are False as baseline before xor
-    xor_sparse_mask = torch.logical_xor(sparse_mask.to(torch.int), shifted_down_sparse_mask.to(torch.int))
+    #       need to add back identity matrix to account for missing diagonal
+    xor_sparse_mask = torch.logical_xor(
+                        sparse_mask.to(torch.int),
+                        shifted_down_sparse_mask.to(torch.int), 
+                      ).to(torch.int)
 
-    cache_triggered = lambda_val * torch.sum(xor_sparse_mask, dim=-1).unsqueeze(-1)
-    lambda_mask = cache_triggered * sparse_mask
-    lambda_mask = torch.cumprod(lambda_mask, dim=-1)
+    evict_triggered = lambda_val * torch.sum(xor_sparse_mask, dim=-1).unsqueeze(-1)
+    lambda_mask = evict_triggered * sparse_mask
+
+    # need to switch zeros to ones for cumprod then switch back before dividing out a
+    # lambda_val to respect initial evictions
+    lambda_mask[lambda_mask == 0] = 1
+    lambda_mask = torch.cumprod(lambda_mask, dim=0)
+    lambda_mask[lambda_mask == 1]  = 0
+
     return lambda_mask / lambda_val
