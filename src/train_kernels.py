@@ -376,7 +376,7 @@ if __name__ == '__main__':
         val_mses = torch.zeros_like(train_mses)
 
         model = model.to(device)
-        qs, ks, vs, os_ = get_activations_layer(model, li, trainloader, batches_to_collect)
+        qs, ks, vs, os_ = mem_eff_get_activations_layer(model, li, trainloader, batches_to_collect, batch_size, num_heads, seq_len, head_dim, permute=True, half_precision=args.half_precision)
         model = model.cpu()
         torch.cuda.empty_cache()
 

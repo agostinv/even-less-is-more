@@ -11,7 +11,7 @@ import random
 
 import math
 
-def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_heads, seq_len, head_dim, permute=True):
+def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_heads, seq_len, head_dim, permute=True, half_precision=True):
     '''
     Collect Q, K, V, and O for a particular layer across a number of batches.
 
@@ -28,11 +28,16 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
     
     inputs, _ = next(iter(dataloader))
     total_size = batches * bsz
-    
-    qs_all = torch.empty((total_size, num_heads, seq_len, head_dim), device=model.model.device)
-    ks_all = torch.empty((total_size, num_heads, seq_len, head_dim), device=model.model.device)
-    vs_all = torch.empty((total_size, num_heads, seq_len, head_dim), device=model.model.device)
-    os_all = torch.empty((total_size, num_heads, seq_len, head_dim), device=model.model.device)
+   
+    if half_precision:
+        dtype = torch.half
+    else:
+        dtype = torch.float
+
+    qs_all = torch.empty((total_size, num_heads, seq_len, head_dim), device=model.model.device, dtype=dtype)
+    ks_all = torch.empty((total_size, num_heads, seq_len, head_dim), device=model.model.device, dtype=dtype)
+    vs_all = torch.empty((total_size, num_heads, seq_len, head_dim), device=model.model.device, dtype=dtype)
+    os_all = torch.empty((total_size, num_heads, seq_len, head_dim), device=model.model.device, dtype=dtype)
 
     for i, (inputs, labels) in enumerate(dataloader):
         if i == batches:
