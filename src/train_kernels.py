@@ -77,7 +77,7 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
             if fix_heavy_to_initial_tokens:
                 sparse_attn_weights, sparse_norms_lse, sparse_mask = A_attn_weights(target_attn_weights, heavy_budget, recent_budget)
             else:
-                sparse_attn_weights, sparse_norms_lse, sparse_mask = h2o_attn_weights(target_attn_weights, heavy_budget, recent_budget, multi_query)
+                sparse_attn_weights, sparse_norms_lse, sparse_mask = h2o_attn_weights(target_attn_weights, heavy_budget, recent_budget, multi_query, lambda_gating, lambda_constant)
             
             # addition of lambda gating-based decay for sparse mask
             if lambda_gating == "constant":
@@ -104,7 +104,7 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
     train_loss /= len(trainloader)
     return train_loss
 
-def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, baseline_hh, baseline_recent):
+def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, baseline_hh, baseline_recent, lambda_gating, lambda_constant):
     val_loss = 0.0
     baseline_val_loss = 0.0
     net.eval()
@@ -117,10 +117,10 @@ def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix
 
             target_out, target_attn, target_attn_weights = get_target_attn_out(config, q, k, v, attn_mask, multi_query)
             if fix_heavy_to_initial_tokens:
-                sparse_attn_weights, sparse_norms_lse, sparse_mask = A_attn_weights(target_attn_weights, heavy_budget, recent_budget)
+                sparse_attn_weights, sparse_norms_lse, sparse_mask = A_attn_weights(target_attn_weights, heavy_budget, recent_budget, lambda_gating, lambda_constant)
                 baseline_sparse_out, _, _ = A_attn_out(config, q, k, v, target_attn_weights, baseline_hh, baseline_recent, multi_query)
             else:
-                sparse_attn_weights, sparse_norms_lse, sparse_mask = h2o_attn_weights(target_attn_weights, heavy_budget, recent_budget, multi_query)
+                sparse_attn_weights, sparse_norms_lse, sparse_mask = h2o_attn_weights(target_attn_weights, heavy_budget, recent_budget, multi_query, lambda_gating, lambda_constant)
                 baseline_sparse_out, _, _ = h2o_attn_out(config, q, k, v, target_attn_weights, baseline_hh, baseline_recent, multi_query)
 
             lr_mask = attn_mask * (~sparse_mask)

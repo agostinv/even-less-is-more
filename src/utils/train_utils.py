@@ -11,7 +11,7 @@ import random
 
 import math
 
-def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_heads, seq_len, head_dim, permute=True, half_precision=True):
+def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_heads, seq_len, head_dim, permute=True, half_precision=True, frag_factor=16):
     '''
     Collect Q, K, V, and O for a particular layer across a number of batches.
 
@@ -34,25 +34,62 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
     else:
         dtype = torch.float
 
-    qs_all = torch.empty((total_size, num_heads, seq_len, head_dim), device=model.model.device, dtype=dtype)
-    ks_all = torch.empty((total_size, num_heads, seq_len, head_dim), device=model.model.device, dtype=dtype)
-    vs_all = torch.empty((total_size, num_heads, seq_len, head_dim), device=model.model.device, dtype=dtype)
-    os_all = torch.empty((total_size, num_heads, seq_len, head_dim), device=model.model.device, dtype=dtype)
+    print(f"Model datatype set to {dtype}")
 
+    qs_all = torch.empty((total_size, num_heads, seq_len, head_dim), device="cpu", dtype=dtype)
+    ks_all = torch.empty((total_size, num_heads, seq_len, head_dim), device="cpu", dtype=dtype)
+    vs_all = torch.empty((total_size, num_heads, seq_len, head_dim), device="cpu", dtype=dtype)
+    os_all = torch.empty((total_size, seq_len, num_heads * head_dim), device="cpu", dtype=dtype)
+
+    # fragmentation factor set to 16 arbitrarily
+    partial_size = int(total_size / frag_factor)
+    partial_batch = int(batches / frag_factor)
+    assert total_size % frag_factor == 0 & batches % frag_factor == 0, "For dataset fragmented loading, the total size must be divisible by the fragmentation factor."
+
+    qs_partial = torch.empty((partial_size, num_heads, seq_len, head_dim), device=model.model.device, dtype=dtype)
+    ks_partial = torch.empty((partial_size, num_heads, seq_len, head_dim), device=model.model.device, dtype=dtype)
+    vs_partial = torch.empty((partial_size, num_heads, seq_len, head_dim), device=model.model.device, dtype=dtype)
+    os_partial = torch.empty((partial_size, seq_len, num_heads * head_dim), device=model.model.device, dtype=dtype)
+
+
+    frag_offset = 0
     for i, (inputs, labels) in enumerate(dataloader):
         if i == batches:
             break
         print(f'Layer {layer}, collecting batch {i+1} / {batches}')
-        
+       
+        frag = i % partial_batch
+
         with torch.inference_mode(): 
             
             inputs = inputs.to(model.model.device)
             outputs, batch_int_values = model(inputs)
-            qs_all[i * bsz:(i + 1) * bsz, :, :, :] = batch_int_values[layer]['Q']
-            ks_all[i * bsz:(i + 1) * bsz, :, :, :] = batch_int_values[layer]['K']
-            vs_all[i * bsz:(i + 1) * bsz, :, :, :] = batch_int_values[layer]['V']
-            os_all[i * bsz:(i + 1) * bsz, :, :, :] = batch_int_values[layer]['O']
+            qs_partial[frag * bsz:(frag + 1) * bsz, :, :, :] = batch_int_values[layer]['Q']
+            ks_partial[frag * bsz:(frag + 1) * bsz, :, :, :] = batch_int_values[layer]['K']
+            vs_partial[frag * bsz:(frag + 1) * bsz, :, :, :] = batch_int_values[layer]['V']
+            os_partial[frag * bsz:(frag + 1) * bsz, :, :] = batch_int_values[layer]['O']
+        
+
+        # begin offloading to tensor in cpu memory at set time-steps
+        if frag == partial_size - 1:
+            qs_partial.to(device='cpu')
+            qs_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :, :] = qs_partial
+            qs_partial.to(device=model.model.device)
             
+            ks_partial.to(device='cpu')
+            ks_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :, :] = ks_partial
+            ks_partial.to(device=model.model.device)
+            
+            vs_partial.to(device='cpu')
+            vs_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :, :] = vs_partial
+            vs_partial.to(device=model.model.device)
+
+            os_partial.to(device='cpu')
+            os_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :] = os_partial
+            os_partial.to(device=model.model.device)
+
+            frag_offset += 1
+
         del inputs, labels, outputs
         torch.cuda.empty_cache()
 
@@ -166,8 +203,10 @@ def A_attn_out(config, q, k, v, attn_weights, heavy_budget, recent_budget, multi
 
 def h2o_attn_weights(attn_weights, heavy_budget, recent_budget, multi_query, lambda_gating, lambda_constant):
     attn_mask = get_h2o_mask(attn_weights, heavy_budget, recent_budget, multi_query=multi_query)
+   
     
     # addition of lambda gating-based decay for sparse mask
+    sparse_mask = attn_mask
     if lambda_gating == "constant":
         sparse_mask = get_lambda_mask_sparse(attn_mask, lambda_constant)
     elif lambda_gating == "time-dependent":
@@ -180,6 +219,7 @@ def A_attn_weights(attn_weights, heavy_budget, recent_budget, lambda_gating, lam
     attn_mask = get_A_mask(attn_weights, heavy_budget, recent_budget)
     
     # addition of lambda gating-based decay for sparse mask
+    sparse_mask = attn_mask
     if lambda_gating == "constant":
         sparse_mask = get_lambda_mask_sparse(attn_mask, lambda_constant)
     elif lambda_gating == "time-dependent":
