@@ -16,7 +16,8 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
     Collect Q, K, V, and O for a particular layer across a number of batches.
 
     This implementation permutes the data before concatenating and pre-allocates tensors to avoid
-    excessive RAM consumption.
+    excessive RAM consumption. In addition, it fragments the data before sending it back to the CPU
+    to avoid constant memory-based delays.
     '''
 
     # dataloader should be a list based on data_processing.py
@@ -71,7 +72,7 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
         
 
         # begin offloading to tensor in cpu memory at set time-steps
-        if frag == partial_size - 1:
+        if frag == partial_batch - 1:
             qs_partial.to(device='cpu')
             qs_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :, :] = qs_partial
             qs_partial.to(device=model.model.device)
@@ -103,6 +104,7 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
 
     return qs_all, ks_all, vs_all, os_all
 
+
 # inefficient use of RAM due to torch.cat(...)
 def get_activations_layer(model, layer, dataloader, batches, permute=True):
     '''
@@ -123,7 +125,6 @@ def get_activations_layer(model, layer, dataloader, batches, permute=True):
             
             inputs = inputs.to(model.model.device)
             outputs, batch_int_values = model(inputs)
-            print(batch_int_values[layer]['Q'].shape)
             qs_all.append(batch_int_values[layer]['Q'])
             ks_all.append(batch_int_values[layer]['K'])
             vs_all.append(batch_int_values[layer]['V'])
@@ -133,7 +134,6 @@ def get_activations_layer(model, layer, dataloader, batches, permute=True):
         torch.cuda.empty_cache()
 
     qs_all = torch.cat(qs_all).transpose(1, 2).flatten(2)
-    print(qs_all.shape)
     ks_all = torch.cat(ks_all).transpose(1, 2).flatten(2)
     vs_all = torch.cat(vs_all).transpose(1, 2).flatten(2)
     os_all = torch.cat(os_all)

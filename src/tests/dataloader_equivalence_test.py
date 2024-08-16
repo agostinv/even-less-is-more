@@ -32,6 +32,8 @@ class TestActivationsLayer(unittest.TestCase):
             seq_len=self.seq_len,
             head_dim=self.head_dim,
             permute=False,
+	    half_precision=False,
+	    frag_factor=2,
         )
         
         qs_all, ks_all, vs_all, os_all = get_activations_layer(
@@ -54,6 +56,8 @@ class DUT(torch.nn.Module):
         super(DUT, self).__init__()
         self.model = torch.nn.Linear(head_dim, head_dim)
         self.model.device = 'cpu'
+        self.num_heads = num_heads
+        self.head_dim = head_dim
 
     def forward(self, x):
         # Simulate the output structure
@@ -63,7 +67,7 @@ class DUT(torch.nn.Module):
                 'Q': self.model(x),
                 'K': self.model(x),
                 'V': self.model(x),
-                'O': self.model(x)
+                'O': self.model(x).view(output.size(0), 1, output.size(2), self.num_heads * self.head_dim).squeeze(1)
             }
         }
         return output, batch_int_values
