@@ -79,12 +79,6 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
             else:
                 sparse_attn_weights, sparse_norms_lse, sparse_mask = h2o_attn_weights(target_attn_weights, heavy_budget, recent_budget, multi_query, lambda_gating, lambda_constant)
             
-            # addition of lambda gating-based decay for sparse mask
-            if lambda_gating == "constant":
-                sparse_mask = get_lambda_mask_sparse(attn_mask, sparse_mask, lambda_constant)
-            elif lambda_gating == "time-dependent":
-                raise NotImplementedError("Time-dependent lambda gating not implemented yet.")
-            
             lr_mask = attn_mask * (~sparse_mask)
             pred_out = net(q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights)
             
