@@ -7,7 +7,7 @@ import gc
 from data_processing import get_c4, get_wikitext2
 from annotated_models.llama import get_annotated_llama
 from annotated_models.falcon import get_annotated_falcon
-from masks import get_A_mask, get_h2o_mask
+from masks import get_A_mask, get_h2o_mask, get_lambda_mask_sparse
 from transformers import set_seed, AutoTokenizer, AutoModelForCausalLM
 import torch
 import torch.nn as nn
@@ -61,7 +61,7 @@ criterion_mse = torch.nn.MSELoss()
 scaler = torch.cuda.amp.GradScaler()
 
 
-def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query):
+def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, lambda_gating, lambda_constant):
     net.train()
     train_loss = 0.0
     
@@ -77,10 +77,9 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
             if fix_heavy_to_initial_tokens:
                 sparse_attn_weights, sparse_norms_lse, sparse_mask = A_attn_weights(target_attn_weights, heavy_budget, recent_budget)
             else:
-                sparse_attn_weights, sparse_norms_lse, sparse_mask = h2o_attn_weights(target_attn_weights, heavy_budget, recent_budget, multi_query)
+                sparse_attn_weights, sparse_norms_lse, sparse_mask = h2o_attn_weights(target_attn_weights, heavy_budget, recent_budget, multi_query, lambda_gating, lambda_constant)
             
             lr_mask = attn_mask * (~sparse_mask)
-            
             pred_out = net(q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights)
             
             if o_proj is not None:
@@ -99,7 +98,7 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
     train_loss /= len(trainloader)
     return train_loss
 
-def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, baseline_hh, baseline_recent):
+def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, baseline_hh, baseline_recent, lambda_gating, lambda_constant):
     val_loss = 0.0
     baseline_val_loss = 0.0
     net.eval()
@@ -112,15 +111,14 @@ def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix
 
             target_out, target_attn, target_attn_weights = get_target_attn_out(config, q, k, v, attn_mask, multi_query)
             if fix_heavy_to_initial_tokens:
-                sparse_attn_weights, sparse_norms_lse, sparse_mask = A_attn_weights(target_attn_weights, heavy_budget, recent_budget)
+                sparse_attn_weights, sparse_norms_lse, sparse_mask = A_attn_weights(target_attn_weights, heavy_budget, recent_budget, lambda_gating, lambda_constant)
                 baseline_sparse_out, _, _ = A_attn_out(config, q, k, v, target_attn_weights, baseline_hh, baseline_recent, multi_query)
             else:
-                sparse_attn_weights, sparse_norms_lse, sparse_mask = h2o_attn_weights(target_attn_weights, heavy_budget, recent_budget, multi_query)
+                sparse_attn_weights, sparse_norms_lse, sparse_mask = h2o_attn_weights(target_attn_weights, heavy_budget, recent_budget, multi_query, lambda_gating, lambda_constant)
                 baseline_sparse_out, _, _ = h2o_attn_out(config, q, k, v, target_attn_weights, baseline_hh, baseline_recent, multi_query)
-            
+
             lr_mask = attn_mask * (~sparse_mask)
             pred_out = net(q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights)
-            
             
             loss_start = heavy_budget + recent_budget
             pred_out = o_proj(pred_out)[:, loss_start:]
@@ -259,6 +257,9 @@ if __name__ == '__main__':
 
     parser.add_argument('--debug', action='store_true') # for wikitext versus c4 loading
 
+    parser.add_argument('--lambda-gating', type=str, choices=[None, 'constant', 'time-dependent'], default=None)
+    parser.add_argument('--lambda-constant', type=float, default=0.98)
+
 
     args = parser.parse_args()
 
@@ -288,6 +289,9 @@ if __name__ == '__main__':
     debug = args.debug   
  
     device = args.device
+
+    lambda_gating = args.lambda_gating
+    lambda_constant = args.lambda_constant
 
     assert heavy_ratio >= 0 and heavy_ratio <= 1 and recent_ratio >= 0 and recent_ratio <= 1
 
@@ -366,7 +370,7 @@ if __name__ == '__main__':
         val_mses = torch.zeros_like(train_mses)
 
         model = model.to(device)
-        qs, ks, vs, os_ = get_activations_layer(model, li, trainloader, batches_to_collect)
+        qs, ks, vs, os_ = mem_eff_get_activations_layer(model, li, trainloader, batches_to_collect, batch_size, num_heads, seq_len, head_dim, permute=True, half_precision=args.half_precision)
         model = model.cpu()
         torch.cuda.empty_cache()
 
@@ -410,7 +414,9 @@ if __name__ == '__main__':
                 recent_budget, 
                 fix_heavy_to_initial_tokens, 
                 o_proj,
-                multi_query
+                multi_query,
+                lambda_gating,
+                lambda_constant,
             )
             val_loss, baseline_loss = validate(
                 net, 
@@ -423,7 +429,9 @@ if __name__ == '__main__':
                 o_proj,
                 multi_query,
                 baseline_hh, 
-                baseline_recent
+                baseline_recent,
+                lambda_gating,
+                lambda_constant
             )
             
             train_mses[epoch] = train_loss
