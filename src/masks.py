@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 
-def local_heavy_hitter_mask_nonoverlap(attn_weights, heavy_budget, recent_budget, no_padding_seq_length=None, multi_query=False):
+def local_heavy_hitter_mask_nonoverlap(attn_weights, heavy_budget, recent_budget, no_padding_seq_length=None, multi_query=False, attention_score_decay=1.0):
 
     # attn_weights (BS, head, query, keys)
     dtype_attn_weights = attn_weights.dtype
@@ -11,11 +11,17 @@ def local_heavy_hitter_mask_nonoverlap(attn_weights, heavy_budget, recent_budget
     if no_padding_seq_length is None:
         padding_length = 0
     else:
-        raise NotImplementedError
+        raise NotImplementedError, "Padding not yet implemented"
         padding_length = seq_length - no_padding_seq_length
 
     offset = torch.finfo(attn_weights.dtype).min
     tmp_attn = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(dtype_attn_weights)
+
+    # does nothing while attention_score_decay isn't set to a custom value, otherwise applies decay along the query axis to 
+    # try and mitigate the power law distribution native to H2O
+    # needs to be added later as well as the lower mask is removed before the below `for loop`
+    attention_decay_mask = torch.tril(attention_score_decay * torch.ones_like(attn_weights, dtype=dtype_attn_weights)).cumprod(dim=-1)
+    tmp_attn = tmp_attn * attention_decay_mask
 
     accumulated_attention_score = torch.sum(tmp_attn[:,:,padding_length:heavy_budget+recent_budget+padding_length,:], dim=-2) #(head, keys)
     accumulated_attention_score[:,:,heavy_budget+recent_budget+padding_length:] = 0
@@ -30,6 +36,10 @@ def local_heavy_hitter_mask_nonoverlap(attn_weights, heavy_budget, recent_budget
     for token_index in range(heavy_budget+recent_budget+padding_length, seq_length):
         
         tmp_attn_index = nn.functional.softmax(attn_weights[:,:,token_index,:], dim=-1, dtype=torch.float32).to(dtype_attn_weights)
+
+        # adding decay behavior to tmp_attn_index, does nothing if attention_score_decay is 1.0
+        tmp_attn_index = tmp_attn_index * attention_decay_mask[:,:,token_index,:]
+
         if multi_query:
             tmp_attn_index = tmp_attn_index.sum(dim=1, keepdim=True) #B1S
         _, tmp_topk_index = accumulated_attention_score[..., :token_index-recent_budget].topk(k=heavy_budget, dim=-1)
@@ -45,9 +55,9 @@ def local_heavy_hitter_mask_nonoverlap(attn_weights, heavy_budget, recent_budget
     return mask_bottom
 
 
-def get_h2o_mask(attn_weights, heavy_budget, recent_budget, multi_query):
+def get_h2o_mask(attn_weights, heavy_budget, recent_budget, multi_query, attention_score_decay):
     if heavy_budget > 0:
-        mask_bottom = local_heavy_hitter_mask_nonoverlap(attn_weights, heavy_budget, recent_budget, multi_query=multi_query) # Default: No padding applied to input
+        mask_bottom = local_heavy_hitter_mask_nonoverlap(attn_weights, heavy_budget, recent_budget, multi_query=multi_query, attention_score_decay=attention_score_decay) # Default: No padding applied to input
     else:
         mask_bottom = torch.zeros_like(attn_weights, dtype=torch.bool)
     if multi_query:

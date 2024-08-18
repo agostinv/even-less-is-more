@@ -201,8 +201,8 @@ def A_attn_out(config, q, k, v, attn_weights, heavy_budget, recent_budget, multi
     return out, torch.logsumexp(attn_weights, -1, keepdim=True), attn_mask
 
 
-def h2o_attn_weights(attn_weights, heavy_budget, recent_budget, multi_query, lambda_gating, lambda_constant):
-    attn_mask = get_h2o_mask(attn_weights, heavy_budget, recent_budget, multi_query=multi_query)
+def h2o_attn_weights(attn_weights, heavy_budget, recent_budget, multi_query, lambda_gating, lambda_constant, attention_score_decay):
+    attn_mask = get_h2o_mask(attn_weights, heavy_budget, recent_budget, multi_query=multi_query, attention_score_decay=attention_score_decay)
    
     
     # addition of lambda gating-based decay for sparse mask
