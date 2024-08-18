@@ -151,10 +151,11 @@ def get_lambda_t_mask_nosparse(attn_weights, lambda_t_val: torch.Tensor):
 
 # currently also takes care of tril mask behavior, may be unnecessary and should be tested
 # as it is inefficient to constantly use it
+# expects sparse_mask of dimensions B x H x N x N
 def get_lambda_mask_sparse(sparse_mask, lambda_val: float):
-    len = sparse_mask.size(0)
+    len = sparse_mask.size(-2)
     shifted_down_sparse_mask = torch.zeros_like(sparse_mask)
-    shifted_down_sparse_mask[1:, :] = sparse_mask[:-1, :]
+    shifted_down_sparse_mask[:, :, 1:, :] = sparse_mask[:, :, :-1, :]
 
     # note: non-zeros are all True, only zeros are False as baseline before xor
     #       need to add back identity matrix to account for missing diagonal
@@ -169,7 +170,7 @@ def get_lambda_mask_sparse(sparse_mask, lambda_val: float):
     # need to switch zeros to ones for cumprod then switch back before dividing out a
     # lambda_val to respect initial evictions
     lambda_mask[lambda_mask == 0] = 1
-    lambda_mask = torch.cumprod(lambda_mask, dim=0)
+    lambda_mask = torch.cumprod(lambda_mask, dim=-2)
     lambda_mask[lambda_mask == 1]  = 0
 
     return lambda_mask / lambda_val
