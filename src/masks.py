@@ -170,7 +170,7 @@ def get_lambda_mask_sparse(sparse_mask, lambda_val: float):
     # need to switch zeros to ones for cumprod then switch back before dividing out a
     # lambda_val to respect initial evictions
     lambda_mask[lambda_mask == 0] = 1
-    lambda_mask = torch.cumprod(lambda_mask, dim=-2)
+    lambda_mask = torch.cumprod(lambda_mask, dim=-2) + (1e-6 * sparse_mask)
     lambda_mask[lambda_mask == 1]  = 0
 
     return lambda_mask / lambda_val

@@ -201,29 +201,14 @@ def A_attn_out(config, q, k, v, attn_weights, heavy_budget, recent_budget, multi
     return out, torch.logsumexp(attn_weights, -1, keepdim=True), attn_mask
 
 
-def h2o_attn_weights(attn_weights, heavy_budget, recent_budget, multi_query, lambda_gating, lambda_constant):
+def h2o_attn_weights(attn_weights, heavy_budget, recent_budget, multi_query):
     attn_mask = get_h2o_mask(attn_weights, heavy_budget, recent_budget, multi_query=multi_query)
-   
     
-    # addition of lambda gating-based decay for sparse mask
-    sparse_mask = attn_mask
-    if lambda_gating == "constant":
-        sparse_mask = get_lambda_mask_sparse(attn_mask, lambda_constant)
-    elif lambda_gating == "time-dependent":
-        raise NotImplementedError("Time-dependent lambda gating not implemented yet.")
-    
-    attn_weights = (attn_weights * sparse_mask) + ((~attn_mask) * torch.finfo(attn_weights.dtype).min)
+    attn_weights = (attn_weights * attn_mask) + ((~attn_mask) * torch.finfo(attn_weights.dtype).min)
     return attn_weights, torch.logsumexp(attn_weights, -1, keepdim=True), attn_mask
 
-def A_attn_weights(attn_weights, heavy_budget, recent_budget, lambda_gating, lambda_constant):
+def A_attn_weights(attn_weights, heavy_budget, recent_budget):
     attn_mask = get_A_mask(attn_weights, heavy_budget, recent_budget)
-    
-    # addition of lambda gating-based decay for sparse mask
-    sparse_mask = attn_mask
-    if lambda_gating == "constant":
-        sparse_mask = get_lambda_mask_sparse(attn_mask, lambda_constant)
-    elif lambda_gating == "time-dependent":
-        raise NotImplementedError("Time-dependent lambda gating not implemented yet.")
 
-    attn_weights = (attn_weights * sparse_mask) + ((~attn_mask) * torch.finfo(attn_weights.dtype).min)
+    attn_weights = (attn_weights * attn_mask) + ((~attn_mask) * torch.finfo(attn_weights.dtype).min)
     return attn_weights, torch.logsumexp(attn_weights, -1, keepdim=True), attn_mask
