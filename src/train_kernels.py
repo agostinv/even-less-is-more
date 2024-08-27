@@ -199,7 +199,7 @@ class KernelizedHeadAttention(nn.Module):
         if lambda_gating == "constant":
             decay_mask = get_lambda_mask_sparse(lr_attn_mask, lambda_constant)
         elif lambda_gating == "learned-constant" or lambda_gating == "learned-constant-head":
-            decay_mask = get_lambda_mask_sparse(lr_attn_mask, self.lambda_val)
+            decay_mask = get_lambda_mask_sparse(lr_attn_mask, F.sigmoid(self.lambda_val))
         elif lambda_gating == "time-dependent":
             raise NotImplementedError("Time-dependent lambda gating not implemented yet.")
             
