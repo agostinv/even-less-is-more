@@ -81,7 +81,7 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
             
             lr_mask = attn_mask * (~sparse_mask)
             
-            pred_out = net(q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, sparse_mask, lambda_constant)
+            pred_out = net(q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant)
             
             if o_proj is not None:
                 loss_start = heavy_budget + recent_budget
@@ -120,7 +120,7 @@ def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix
 
             lr_mask = attn_mask * (~sparse_mask)
             
-            pred_out = net(q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, sparse_mask)
+            pred_out = net(q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant)
             
             loss_start = heavy_budget + recent_budget
             pred_out = o_proj(pred_out)[:, loss_start:]
@@ -180,11 +180,13 @@ class KernelizedHeadAttention(nn.Module):
         self.scalingD = nn.Parameter(torch.ones(1, num_heads, 1, dim_ker) * 1e-4, requires_grad=True)
         self.scalingD2 = nn.Parameter(torch.ones(1, num_heads, 1, dim_ker) * 1e-4, requires_grad=True)
 
-        # initialize at 1.0 for all learned lambdas that are still time-independent
+        # initialize at 5.0 for all learned lambdas that are still time-independent
+        # initialization at 5.0 results in decay post-sigmoid of around 0.99 without being too deep
+        # into extremely low gradient territory, seems neutral enough
         if lambda_gating == "learned-constant":
-            self.lambda_val = nn.Parameter(torch.ones(1), requires_grad=True)
+            self.lambda_val = nn.Parameter(5.0 * torch.ones(1), requires_grad=True)
         elif lambda_gating == "learned-constant-head":
-            self.lambda_val = nn.Parameter(torch.ones(num_heads), requires_grad=True)
+            self.lambda_val = nn.Parameter(5.0 * torch.ones(num_heads), requires_grad=True)
 
         self.multi_query = multi_query
         self.act = F.gelu
