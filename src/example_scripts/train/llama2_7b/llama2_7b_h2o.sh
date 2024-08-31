@@ -1,10 +1,11 @@
 #!/bin/bash
 
 save_dir=llama2_7b_h2o
-root=/people/agos983/even-less-is-more/
+root=<PATH_TO_ROOT>
+venv_root=<PATH_TO_VENV>
 
 cd ${root}
-source ${root}/../test-venv/bin/activate
+source ${venv_root}
 
 export HUGGINGFACE_HUB_CACHE="${root}/.cache"
 export HF_DATASETS_CACHE="${root}/.cache/datasets"

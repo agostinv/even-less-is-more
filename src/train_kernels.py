@@ -77,10 +77,18 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
             if fix_heavy_to_initial_tokens:
                 sparse_attn_weights, sparse_norms_lse, sparse_mask = A_attn_weights(target_attn_weights, heavy_budget, recent_budget)
             else:
-                sparse_attn_weights, sparse_norms_lse, sparse_mask = h2o_attn_weights(target_attn_weights, heavy_budget, recent_budget, multi_query, lambda_gating, lambda_constant, attention_score_decay)
+                sparse_attn_weights, sparse_norms_lse, sparse_mask = h2o_attn_weights(target_attn_weights, heavy_budget, recent_budget, multi_query, attention_score_decay)
             
             lr_mask = attn_mask * (~sparse_mask)
-            pred_out = net(q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights)
+            
+            # addition of lambda gating-based decay for sparse mask
+            sparse_mask = None
+            if lambda_gating == "constant":
+                sparse_mask = get_lambda_mask_sparse(attn_mask, lambda_constant)
+            elif lambda_gating == "time-dependent":
+                raise NotImplementedError("Time-dependent lambda gating not implemented yet.")
+            
+            pred_out = net(q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, sparse_mask)
             
             if o_proj is not None:
                 loss_start = heavy_budget + recent_budget
@@ -111,14 +119,22 @@ def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix
 
             target_out, target_attn, target_attn_weights = get_target_attn_out(config, q, k, v, attn_mask, multi_query)
             if fix_heavy_to_initial_tokens:
-                sparse_attn_weights, sparse_norms_lse, sparse_mask = A_attn_weights(target_attn_weights, heavy_budget, recent_budget, lambda_gating, lambda_constant)
+                sparse_attn_weights, sparse_norms_lse, sparse_mask = A_attn_weights(target_attn_weights, heavy_budget, recent_budget)
                 baseline_sparse_out, _, _ = A_attn_out(config, q, k, v, target_attn_weights, baseline_hh, baseline_recent, multi_query)
             else:
-                sparse_attn_weights, sparse_norms_lse, sparse_mask = h2o_attn_weights(target_attn_weights, heavy_budget, recent_budget, multi_query, lambda_gating, lambda_constant, attention_score_decay)
+                sparse_attn_weights, sparse_norms_lse, sparse_mask = h2o_attn_weights(target_attn_weights, heavy_budget, recent_budget, multi_query, attention_score_decay)
                 baseline_sparse_out, _, _ = h2o_attn_out(config, q, k, v, target_attn_weights, baseline_hh, baseline_recent, multi_query)
 
             lr_mask = attn_mask * (~sparse_mask)
-            pred_out = net(q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights)
+            
+            # addition of lambda gating-based decay for sparse mask
+            sparse_mask = None
+            if lambda_gating == "constant":
+                sparse_mask = get_lambda_mask_sparse(attn_mask, lambda_constant)
+            elif lambda_gating == "time-dependent":
+                raise NotImplementedError("Time-dependent lambda gating not implemented yet.")
+            
+            pred_out = net(q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, sparse_mask)
             
             loss_start = heavy_budget + recent_budget
             pred_out = o_proj(pred_out)[:, loss_start:]
@@ -183,7 +199,7 @@ class KernelizedHeadAttention(nn.Module):
         self.kernel_f = F.gelu
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, q, k, v, lr_attn_mask, sparse_norms_lse, sparse_attn_weights):
+    def forward(self, q, k, v, lr_attn_mask, sparse_norms_lse, sparse_attn_weights, decay_mask=None):
         B, S, D = q.shape
             
         q = q.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
@@ -208,7 +224,10 @@ class KernelizedHeadAttention(nn.Module):
         
         out = torch.matmul(q.abs(), k.abs().transpose(2, 3))#B, H, S, S
         
-        out = lr_attn_mask * out
+        if decay_mask is not None:
+            out = decay_mask * out
+        else:
+            out = lr_attn_mask * out
 
         lr_norms_lse = torch.log(out.sum(dim=-1, keepdim=True) + 1e-6)
         norm_factor_lse = torch.logaddexp(lr_norms_lse, sparse_norms_lse)
