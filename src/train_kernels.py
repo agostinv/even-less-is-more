@@ -23,11 +23,11 @@ from tqdm import tqdm
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
-def reset_seed():
-    torch.manual_seed(0)
-    np.random.seed(0)
-    random.seed(0)
-    set_seed(42)
+def reset_seed(offset: int):
+    torch.manual_seed(0 + offset)
+    np.random.seed(0 + offset)
+    random.seed(0 + offset)
+    set_seed(42 + offset)
 
 
 models_sizes_dict = {
@@ -251,7 +251,8 @@ if __name__ == '__main__':
     parser.add_argument('--model_name', type=str, default='llama2')
     parser.add_argument('--model_size', type=int, default=0)
     parser.add_argument("--device", type=str, default='cuda:0')
-    
+    parser.add_argument("--random-seed-offset", type=int, default=0)
+     
     # Data Collection 
     parser.add_argument('--seq_len', type=int, default=-1) 
     parser.add_argument('--sampling_batch_size', type=int, default=1)
@@ -315,6 +316,8 @@ if __name__ == '__main__':
     lambda_gating = args.lambda_gating
     lambda_constant = args.lambda_constant
 
+    random_seed_offset = args.random_seed_offset
+
     assert heavy_ratio >= 0 and heavy_ratio <= 1 and recent_ratio >= 0 and recent_ratio <= 1
 
     try:
@@ -343,9 +346,9 @@ if __name__ == '__main__':
 
     # debugging is faster with wt
     if not debug:
-        trainloader = get_c4(nsamples=batches_to_collect, seed=0, seqlen=seq_len, tokenizer=tokenizer, batch_size=sampling_batch_size)
+        trainloader = get_c4(nsamples=batches_to_collect, seed=(0 + random_seed_offset), seqlen=seq_len, tokenizer=tokenizer, batch_size=sampling_batch_size)
     else:
-        trainloader = get_wikitext2(nsamples=batches_to_collect, seed=0, seqlen=seq_len, tokenizer=tokenizer, batch_size=sampling_batch_size)
+        trainloader = get_wikitext2(nsamples=batches_to_collect, seed=(0 + random_seed_offset), seqlen=seq_len, tokenizer=tokenizer, batch_size=sampling_batch_size)
     
     model = annotated_functions[model_name](model,[i for i in range(layer_start, layer_end)])
 
@@ -383,7 +386,7 @@ if __name__ == '__main__':
         if li < layer_start or li >= layer_end:
             continue
         print(f'STARTING LAYER {li}')
-        reset_seed()
+        reset_seed(random_seed_offset)
 
         model.toggle_layer(li)
         
@@ -392,7 +395,7 @@ if __name__ == '__main__':
         val_mses = torch.zeros_like(train_mses)
 
         model = model.to(device)
-        qs, ks, vs, os_ = mem_eff_get_activations_layer(model, li, trainloader, batches_to_collect, batch_size, num_heads, seq_len, head_dim, permute=True, half_precision=args.half_precision)
+        qs, ks, vs, os_ = mem_eff_get_activations_layer(model, li, trainloader, batches_to_collect, batch_size, num_heads, seq_len, head_dim, permute=True, half_precision=args.half_precision, multi_query=multi_query)
         model = model.cpu()
         torch.cuda.empty_cache()
 
@@ -460,6 +463,7 @@ if __name__ == '__main__':
             print("EPOCH", epoch + 1)
             print("Train loss:", train_loss)
             print("Val loss: ", val_loss)
+            print("Best val loss: ", best)
             print("Baseline+ val loss: ", baseline_loss)
 
             scheduler.step()
@@ -476,6 +480,9 @@ if __name__ == '__main__':
                 f'{save_dir}/layer_{li}.pth')
             
                 net = net.to(device)
+
+        if lambda_gating == "learned-constant" or lambda_gating == "learned-constant-head":
+            print(f"Final learned gate decay values: {net.lambda_val}")
 
         if args.half_precision:
             o_proj_module = o_proj_dict[model_name](l)
