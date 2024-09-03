@@ -61,7 +61,8 @@ criterion_mse = torch.nn.MSELoss()
 scaler = torch.cuda.amp.GradScaler()
 
 
-def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, lambda_constant):
+def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, lambda_constant, attention_score_decay):
+
     net.train()
     train_loss = 0.0
     
@@ -77,7 +78,7 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
             if fix_heavy_to_initial_tokens:
                 sparse_attn_weights, sparse_norms_lse, sparse_mask = A_attn_weights(target_attn_weights, heavy_budget, recent_budget)
             else:
-                sparse_attn_weights, sparse_norms_lse, sparse_mask = h2o_attn_weights(target_attn_weights, heavy_budget, recent_budget, multi_query)
+                sparse_attn_weights, sparse_norms_lse, sparse_mask = h2o_attn_weights(target_attn_weights, heavy_budget, recent_budget, multi_query, attention_score_decay)
             
             lr_mask = attn_mask * (~sparse_mask)
             
@@ -99,7 +100,9 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
     train_loss /= len(trainloader)
     return train_loss
 
-def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, baseline_hh, baseline_recent, lambda_constant):
+  
+def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, baseline_hh, baseline_recent, lambda_constant, attention_score_decay):
+
     val_loss = 0.0
     baseline_val_loss = 0.0
     net.eval()
@@ -115,7 +118,7 @@ def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix
                 sparse_attn_weights, sparse_norms_lse, sparse_mask = A_attn_weights(target_attn_weights, heavy_budget, recent_budget)
                 baseline_sparse_out, _, _ = A_attn_out(config, q, k, v, target_attn_weights, baseline_hh, baseline_recent, multi_query)
             else:
-                sparse_attn_weights, sparse_norms_lse, sparse_mask = h2o_attn_weights(target_attn_weights, heavy_budget, recent_budget, multi_query)
+                sparse_attn_weights, sparse_norms_lse, sparse_mask = h2o_attn_weights(target_attn_weights, heavy_budget, recent_budget, multi_query, attention_score_decay)
                 baseline_sparse_out, _, _ = h2o_attn_out(config, q, k, v, target_attn_weights, baseline_hh, baseline_recent, multi_query)
 
             lr_mask = attn_mask * (~sparse_mask)
@@ -284,6 +287,8 @@ if __name__ == '__main__':
     parser.add_argument('--lambda-gating', type=str, choices=[None, 'constant', 'learned-constant', 'learned-constant-head', 'time-dependent'], default=None)
     parser.add_argument('--lambda-constant', type=float, default=1.0)
 
+    parser.add_argument('--attention-score-decay', type=float, default=1.0) # enables attention accumulation decay
+
 
     args = parser.parse_args()
 
@@ -317,6 +322,7 @@ if __name__ == '__main__':
     lambda_gating = args.lambda_gating
     lambda_constant = args.lambda_constant
 
+    attention_score_decay = args.attention_score_decay
     random_seed_offset = args.random_seed_offset
 
     assert heavy_ratio >= 0 and heavy_ratio <= 1 and recent_ratio >= 0 and recent_ratio <= 1
@@ -441,6 +447,7 @@ if __name__ == '__main__':
                 o_proj,
                 multi_query,
                 lambda_constant,
+                attention_score_decay,
             )
             val_loss, baseline_loss = validate(
                 net, 
@@ -454,7 +461,8 @@ if __name__ == '__main__':
                 multi_query,
                 baseline_hh, 
                 baseline_recent,
-                lambda_constant
+                lambda_constant,
+                attention_score_decay,
             )
             
             train_mses[epoch] = train_loss

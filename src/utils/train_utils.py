@@ -209,8 +209,9 @@ def A_attn_out(config, q, k, v, attn_weights, heavy_budget, recent_budget, multi
     return out, torch.logsumexp(attn_weights, -1, keepdim=True), attn_mask
 
 
-def h2o_attn_weights(attn_weights, heavy_budget, recent_budget, multi_query):
-    attn_mask = get_h2o_mask(attn_weights, heavy_budget, recent_budget, multi_query=multi_query)
+def h2o_attn_weights(attn_weights, heavy_budget, recent_budget, multi_query, attention_score_decay):
+    attn_mask = get_h2o_mask(attn_weights, heavy_budget, recent_budget, multi_query=multi_query, attention_score_decay=attention_score_decay)
+
     
     attn_weights = (attn_weights * attn_mask) + ((~attn_mask) * torch.finfo(attn_weights.dtype).min)
     return attn_weights, torch.logsumexp(attn_weights, -1, keepdim=True), attn_mask
