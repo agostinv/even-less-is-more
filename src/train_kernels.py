@@ -186,6 +186,7 @@ class KernelizedHeadAttention(nn.Module):
         if lambda_gating == "learned-constant":
             self.lambda_val = nn.Parameter(5.0 * torch.ones(1), requires_grad=True)
         elif lambda_gating == "learned-constant-head":
+            assert not multi_query, "Multi-query not supported for MQA."
             self.lambda_val = nn.Parameter(5.0 * torch.ones(num_heads), requires_grad=True)
 
         self.multi_query = multi_query
