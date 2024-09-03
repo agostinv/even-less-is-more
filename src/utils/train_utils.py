@@ -11,7 +11,7 @@ import random
 
 import math
 
-def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_heads, seq_len, head_dim, permute=True, half_precision=True, frag_factor=16):
+def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_heads, seq_len, head_dim, permute=True, half_precision=True, frag_factor=16, multi_query=False):
     '''
     Collect Q, K, V, and O for a particular layer across a number of batches.
 
@@ -38,9 +38,13 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
     print(f"Model datatype set to {dtype}")
 
     qs_all = torch.empty((total_size, num_heads, seq_len, head_dim), device="cpu", dtype=dtype)
-    ks_all = torch.empty((total_size, num_heads, seq_len, head_dim), device="cpu", dtype=dtype)
-    vs_all = torch.empty((total_size, num_heads, seq_len, head_dim), device="cpu", dtype=dtype)
     os_all = torch.empty((total_size, seq_len, num_heads * head_dim), device="cpu", dtype=dtype)
+    if not multi_query:
+        ks_all = torch.empty((total_size, num_heads, seq_len, head_dim), device="cpu", dtype=dtype)
+        vs_all = torch.empty((total_size, num_heads, seq_len, head_dim), device="cpu", dtype=dtype)
+    else:
+        ks_all = torch.empty((total_size, 1, seq_len, head_dim), device="cpu", dtype=dtype)
+        vs_all = torch.empty((total_size, 1, seq_len, head_dim), device="cpu", dtype=dtype)
 
     # fragmentation factor set to 16 arbitrarily
     partial_size = int(total_size / frag_factor)
@@ -48,9 +52,13 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
     assert total_size % frag_factor == 0 & batches % frag_factor == 0, "For dataset fragmented loading, the total size must be divisible by the fragmentation factor."
 
     qs_partial = torch.empty((partial_size, num_heads, seq_len, head_dim), device=model.model.device, dtype=dtype)
-    ks_partial = torch.empty((partial_size, num_heads, seq_len, head_dim), device=model.model.device, dtype=dtype)
-    vs_partial = torch.empty((partial_size, num_heads, seq_len, head_dim), device=model.model.device, dtype=dtype)
     os_partial = torch.empty((partial_size, seq_len, num_heads * head_dim), device=model.model.device, dtype=dtype)
+    if not multi_query:
+        ks_partial = torch.empty((partial_size, num_heads, seq_len, head_dim), device=model.model.device, dtype=dtype)
+        vs_partial = torch.empty((partial_size, num_heads, seq_len, head_dim), device=model.model.device, dtype=dtype)
+    else:
+        ks_partial = torch.empty((partial_size, 1, seq_len, head_dim), device=model.model.device, dtype=dtype)
+        vs_partial = torch.empty((partial_size, 1, seq_len, head_dim), device=model.model.device, dtype=dtype)
 
 
     frag_offset = 0

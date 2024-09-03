@@ -167,7 +167,8 @@ def get_lambda_t_mask_nosparse(attn_weights, lambda_t_val: torch.Tensor):
 # currently also takes care of tril mask behavior, may be unnecessary and should be tested
 # as it is inefficient to constantly use it
 # expects sparse_mask of dimensions B x H x N x N
-def get_lambda_mask_sparse(sparse_mask, lambda_val: float):
+# originally, lambda_val was just a float but we should now expect potential tensors of size H
+def get_lambda_mask_sparse(sparse_mask, lambda_val):
     len = sparse_mask.size(-2)
     shifted_down_sparse_mask = torch.zeros_like(sparse_mask)
     shifted_down_sparse_mask[:, :, 1:, :] = sparse_mask[:, :, :-1, :]
@@ -179,7 +180,11 @@ def get_lambda_mask_sparse(sparse_mask, lambda_val: float):
                         shifted_down_sparse_mask.to(torch.int), 
                       ).to(torch.int)
 
-    evict_triggered = lambda_val * torch.sum(xor_sparse_mask, dim=-1).unsqueeze(-1)
+    # check for case where lambda_val is set for each attention head
+    if torch.is_tensor(lambda_val) and lambda_val.size(-1) > 1:
+        evict_triggered = lambda_val.view(1, lambda_val.size(-1), 1, 1) * torch.sum(xor_sparse_mask, dim=-1).unsqueeze(-1)
+    else:
+        evict_triggered = lambda_val * torch.sum(xor_sparse_mask, dim=-1).unsqueeze(-1)
     lambda_mask = evict_triggered * sparse_mask
 
     # need to switch zeros to ones for cumprod then switch back before dividing out a
@@ -188,4 +193,9 @@ def get_lambda_mask_sparse(sparse_mask, lambda_val: float):
     lambda_mask = torch.cumprod(lambda_mask, dim=-2) + (1e-6 * sparse_mask)
     lambda_mask[lambda_mask == 1]  = 0
 
-    return lambda_mask / lambda_val
+    
+    if torch.is_tensor(lambda_val) and lambda_val.size(-1) > 1:
+        return lambda_mask / lambda_val.view(1, lambda_val.size(-1), 1, 1)
+    else:
+        return lambda_mask / lambda_val
+
