@@ -428,7 +428,6 @@ if __name__ == '__main__':
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
         best = float('inf')
         for epoch in tqdm(range(epochs)):
-        #for epoch in tqdm(range(2)):
             train_loss = train(
                 net, 
                 config, 
@@ -460,12 +459,6 @@ if __name__ == '__main__':
             train_mses[epoch] = train_loss
             val_mses[epoch] = val_loss
             
-            print("EPOCH", epoch + 1)
-            print("Train loss:", train_loss)
-            print("Val loss: ", val_loss)
-            print("Best val loss: ", best)
-            print("Baseline+ val loss: ", baseline_loss)
-
             scheduler.step()
 
             if val_loss < best:
@@ -480,6 +473,12 @@ if __name__ == '__main__':
                 f'{save_dir}/layer_{li}.pth')
             
                 net = net.to(device)
+
+            print("EPOCH", epoch + 1)
+            print("Train loss:", train_loss)
+            print("Val loss: ", val_loss)
+            print("Best val loss: ", best)
+            print("Baseline+ val loss: ", baseline_loss)
 
         if lambda_gating == "learned-constant" or lambda_gating == "learned-constant-head":
             print(f"Final learned gate decay values: {net.lambda_val}")
