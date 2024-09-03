@@ -23,11 +23,11 @@ from tqdm import tqdm
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
-def reset_seed():
-    torch.manual_seed(0)
-    np.random.seed(0)
-    random.seed(0)
-    set_seed(42)
+def reset_seed(offset: int):
+    torch.manual_seed(0 + offset)
+    np.random.seed(0 + offset)
+    random.seed(0 + offset)
+    set_seed(42 + offset)
 
 
 models_sizes_dict = {
@@ -61,7 +61,7 @@ criterion_mse = torch.nn.MSELoss()
 scaler = torch.cuda.amp.GradScaler()
 
 
-def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, lambda_gating, lambda_constant):
+def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, lambda_constant):
     net.train()
     train_loss = 0.0
     
@@ -81,14 +81,7 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
             
             lr_mask = attn_mask * (~sparse_mask)
             
-            # addition of lambda gating-based decay for sparse mask
-            sparse_mask = None
-            if lambda_gating == "constant":
-                sparse_mask = get_lambda_mask_sparse(attn_mask, lambda_constant)
-            elif lambda_gating == "time-dependent":
-                raise NotImplementedError("Time-dependent lambda gating not implemented yet.")
-            
-            pred_out = net(q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, sparse_mask)
+            pred_out = net(q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant)
             
             if o_proj is not None:
                 loss_start = heavy_budget + recent_budget
@@ -106,7 +99,7 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
     train_loss /= len(trainloader)
     return train_loss
 
-def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, baseline_hh, baseline_recent, lambda_gating, lambda_constant):
+def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, baseline_hh, baseline_recent, lambda_constant):
     val_loss = 0.0
     baseline_val_loss = 0.0
     net.eval()
@@ -127,14 +120,7 @@ def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix
 
             lr_mask = attn_mask * (~sparse_mask)
             
-            # addition of lambda gating-based decay for sparse mask
-            sparse_mask = None
-            if lambda_gating == "constant":
-                sparse_mask = get_lambda_mask_sparse(attn_mask, lambda_constant)
-            elif lambda_gating == "time-dependent":
-                raise NotImplementedError("Time-dependent lambda gating not implemented yet.")
-            
-            pred_out = net(q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, sparse_mask)
+            pred_out = net(q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant)
             
             loss_start = heavy_budget + recent_budget
             pred_out = o_proj(pred_out)[:, loss_start:]
@@ -153,7 +139,7 @@ def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix
 
 
 class KernelizedHeadAttention(nn.Module):
-    def __init__(self, dim_head, dim_hid, dim_ker, num_heads, dropout, multi_query=False):
+    def __init__(self, dim_head, dim_hid, dim_ker, num_heads, dropout, multi_query=False, lambda_gating=None):
         super().__init__()
         self.dim_ker = dim_ker
         self.num_heads = num_heads
@@ -194,13 +180,31 @@ class KernelizedHeadAttention(nn.Module):
         self.scalingD = nn.Parameter(torch.ones(1, num_heads, 1, dim_ker) * 1e-4, requires_grad=True)
         self.scalingD2 = nn.Parameter(torch.ones(1, num_heads, 1, dim_ker) * 1e-4, requires_grad=True)
 
+        # initialize at 5.0 for all learned lambdas that are still time-independent
+        # initialization at 5.0 results in decay post-sigmoid of around 0.99 without being too deep
+        # into extremely low gradient territory, seems neutral enough
+        if lambda_gating == "learned-constant":
+            self.lambda_val = nn.Parameter(5.0 * torch.ones(1), requires_grad=True)
+        elif lambda_gating == "learned-constant-head":
+            assert not multi_query, "Multi-query not supported for MQA."
+            self.lambda_val = nn.Parameter(5.0 * torch.ones(num_heads), requires_grad=True)
+
         self.multi_query = multi_query
         self.act = F.gelu
         self.kernel_f = F.gelu
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, q, k, v, lr_attn_mask, sparse_norms_lse, sparse_attn_weights, decay_mask=None):
+    def forward(self, q, k, v, lr_attn_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant):
         B, S, D = q.shape
+            
+        # addition of lambda gating-based decay for sparse mask
+        decay_mask = None
+        if lambda_gating == "constant":
+            decay_mask = get_lambda_mask_sparse(lr_attn_mask, lambda_constant)
+        elif lambda_gating == "learned-constant" or lambda_gating == "learned-constant-head":
+            decay_mask = get_lambda_mask_sparse(lr_attn_mask, F.sigmoid(self.lambda_val))
+        elif lambda_gating == "time-dependent":
+            raise NotImplementedError("Time-dependent lambda gating not implemented yet.")
             
         q = q.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
         if not multi_query:
@@ -248,7 +252,8 @@ if __name__ == '__main__':
     parser.add_argument('--model_name', type=str, default='llama2')
     parser.add_argument('--model_size', type=int, default=0)
     parser.add_argument("--device", type=str, default='cuda:0')
-    
+    parser.add_argument("--random-seed-offset", type=int, default=0)
+     
     # Data Collection 
     parser.add_argument('--seq_len', type=int, default=-1) 
     parser.add_argument('--sampling_batch_size', type=int, default=1)
@@ -276,8 +281,8 @@ if __name__ == '__main__':
 
     parser.add_argument('--debug', action='store_true') # for wikitext versus c4 loading
 
-    parser.add_argument('--lambda-gating', type=str, choices=[None, 'constant', 'time-dependent'], default=None)
-    parser.add_argument('--lambda-constant', type=float, default=0.98)
+    parser.add_argument('--lambda-gating', type=str, choices=[None, 'constant', 'learned-constant', 'learned-constant-head', 'time-dependent'], default=None)
+    parser.add_argument('--lambda-constant', type=float, default=1.0)
 
 
     args = parser.parse_args()
@@ -312,6 +317,8 @@ if __name__ == '__main__':
     lambda_gating = args.lambda_gating
     lambda_constant = args.lambda_constant
 
+    random_seed_offset = args.random_seed_offset
+
     assert heavy_ratio >= 0 and heavy_ratio <= 1 and recent_ratio >= 0 and recent_ratio <= 1
 
     try:
@@ -340,9 +347,9 @@ if __name__ == '__main__':
 
     # debugging is faster with wt
     if not debug:
-        trainloader = get_c4(nsamples=batches_to_collect, seed=0, seqlen=seq_len, tokenizer=tokenizer, batch_size=sampling_batch_size)
+        trainloader = get_c4(nsamples=batches_to_collect, seed=(0 + random_seed_offset), seqlen=seq_len, tokenizer=tokenizer, batch_size=sampling_batch_size)
     else:
-        trainloader = get_wikitext2(nsamples=batches_to_collect, seed=0, seqlen=seq_len, tokenizer=tokenizer, batch_size=sampling_batch_size)
+        trainloader = get_wikitext2(nsamples=batches_to_collect, seed=(0 + random_seed_offset), seqlen=seq_len, tokenizer=tokenizer, batch_size=sampling_batch_size)
     
     model = annotated_functions[model_name](model,[i for i in range(layer_start, layer_end)])
 
@@ -380,7 +387,7 @@ if __name__ == '__main__':
         if li < layer_start or li >= layer_end:
             continue
         print(f'STARTING LAYER {li}')
-        reset_seed()
+        reset_seed(random_seed_offset)
 
         model.toggle_layer(li)
         
@@ -389,7 +396,7 @@ if __name__ == '__main__':
         val_mses = torch.zeros_like(train_mses)
 
         model = model.to(device)
-        qs, ks, vs, os_ = mem_eff_get_activations_layer(model, li, trainloader, batches_to_collect, batch_size, num_heads, seq_len, head_dim, permute=True, half_precision=args.half_precision)
+        qs, ks, vs, os_ = mem_eff_get_activations_layer(model, li, trainloader, batches_to_collect, batch_size, num_heads, seq_len, head_dim, permute=True, half_precision=args.half_precision, multi_query=multi_query)
         model = model.cpu()
         torch.cuda.empty_cache()
 
@@ -409,7 +416,7 @@ if __name__ == '__main__':
         trainloader_net = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=1)
         valloader_net = torch.utils.data.DataLoader(val_data, batch_size=batch_size, shuffle=False, num_workers=1)
 
-        net = KernelizedHeadAttention(head_dim, ker_hid, ker_dim, num_heads, dropout, multi_query)
+        net = KernelizedHeadAttention(head_dim, ker_hid, ker_dim, num_heads, dropout, multi_query, lambda_gating)
         net.to(device).float()
 
         o_proj = o_proj_dict[model_name](l).float().to(device)
@@ -422,7 +429,6 @@ if __name__ == '__main__':
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
         best = float('inf')
         for epoch in tqdm(range(epochs)):
-        #for epoch in tqdm(range(2)):
             train_loss = train(
                 net, 
                 config, 
@@ -434,7 +440,6 @@ if __name__ == '__main__':
                 fix_heavy_to_initial_tokens, 
                 o_proj,
                 multi_query,
-                lambda_gating,
                 lambda_constant,
             )
             val_loss, baseline_loss = validate(
@@ -449,18 +454,12 @@ if __name__ == '__main__':
                 multi_query,
                 baseline_hh, 
                 baseline_recent,
-                lambda_gating,
                 lambda_constant
             )
             
             train_mses[epoch] = train_loss
             val_mses[epoch] = val_loss
             
-            print("EPOCH", epoch + 1)
-            print("Train loss:", train_loss)
-            print("Val loss: ", val_loss)
-            print("Baseline+ val loss: ", baseline_loss)
-
             scheduler.step()
 
             if val_loss < best:
@@ -475,6 +474,15 @@ if __name__ == '__main__':
                 f'{save_dir}/layer_{li}.pth')
             
                 net = net.to(device)
+
+            print("EPOCH", epoch + 1)
+            print("Train loss:", train_loss)
+            print("Val loss: ", val_loss)
+            print("Best val loss: ", best)
+            print("Baseline+ val loss: ", baseline_loss)
+
+        if lambda_gating == "learned-constant" or lambda_gating == "learned-constant-head":
+            print(f"Final learned gate decay values: {net.lambda_val}")
 
         if args.half_precision:
             o_proj_module = o_proj_dict[model_name](l)
