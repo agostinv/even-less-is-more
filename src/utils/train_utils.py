@@ -37,6 +37,7 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
 
     print(f"Model datatype set to {dtype}")
 
+    xs_all = torch.empty((total_size, seq_len, num_heads * head_dim), device="cpu", dtype=dtype)
     qs_all = torch.empty((total_size, num_heads, seq_len, head_dim), device="cpu", dtype=dtype)
     os_all = torch.empty((total_size, seq_len, num_heads * head_dim), device="cpu", dtype=dtype)
     if not multi_query:
@@ -51,6 +52,7 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
     partial_batch = int(batches / frag_factor)
     assert total_size % frag_factor == 0 & batches % frag_factor == 0, "For dataset fragmented loading, the total size must be divisible by the fragmentation factor."
 
+    xs_partial = torch.empty((partial_size, seq_len, num_heads * head_dim), device=model.model.device, dtype=dtype)
     qs_partial = torch.empty((partial_size, num_heads, seq_len, head_dim), device=model.model.device, dtype=dtype)
     os_partial = torch.empty((partial_size, seq_len, num_heads * head_dim), device=model.model.device, dtype=dtype)
     if not multi_query:
@@ -73,7 +75,7 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
             
             inputs = inputs.to(model.model.device)
             outputs, batch_int_values = model(inputs)
-            print(batch_int_values[layer].keys())
+            xs_partial[frag * bsz:(frag + 1) * bsz, :, :] = batch_int_values[layer]['x_t']
             qs_partial[frag * bsz:(frag + 1) * bsz, :, :, :] = batch_int_values[layer]['Q']
             ks_partial[frag * bsz:(frag + 1) * bsz, :, :, :] = batch_int_values[layer]['K']
             vs_partial[frag * bsz:(frag + 1) * bsz, :, :, :] = batch_int_values[layer]['V']
@@ -82,6 +84,10 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
 
         # begin offloading to tensor in cpu memory at set time-steps
         if frag == partial_batch - 1:
+            xs_partial.to(device='cpu')
+            xs_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :] = xs_partial
+            xs_partial.to(device=model.model.device)
+
             qs_partial.to(device='cpu')
             qs_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :, :] = qs_partial
             qs_partial.to(device=model.model.device)
