@@ -73,6 +73,7 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
             
             inputs = inputs.to(model.model.device)
             outputs, batch_int_values = model(inputs)
+            print(batch_int_values[layer].keys())
             qs_partial[frag * bsz:(frag + 1) * bsz, :, :, :] = batch_int_values[layer]['Q']
             ks_partial[frag * bsz:(frag + 1) * bsz, :, :, :] = batch_int_values[layer]['K']
             vs_partial[frag * bsz:(frag + 1) * bsz, :, :, :] = batch_int_values[layer]['V']
@@ -159,11 +160,12 @@ def get_activations_layer(model, layer, dataloader, batches, permute=True):
     return qs_all, ks_all, vs_all, os_all
 
 
-class QKVODataset(Dataset):
+class xQKVODataset(Dataset):
     '''
     Simple PyTorch dataset of Q, K, V, and O.
     '''
-    def __init__(self, Q, K, V, O):
+    def __init__(self, x, Q, K, V, O):
+        self.x = x
         self.Q = Q
         self.K = K
         self.V = V
@@ -173,7 +175,7 @@ class QKVODataset(Dataset):
         return len(self.Q)
 
     def __getitem__(self, idx):
-        return self.Q[idx].float(), self.K[idx].float(), self.V[idx].float(), self.O[idx].float()
+        return self.x[idx].fload(), self.Q[idx].float(), self.K[idx].float(), self.V[idx].float(), self.O[idx].float()
 
 def get_target_attn(config, q, k, attn_mask):
     target_attn = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(config.hidden_size // config.num_attention_heads)

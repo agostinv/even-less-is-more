@@ -66,7 +66,8 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
     net.train()
     train_loss = 0.0
     
-    for j, (q, k, v, o) in enumerate(trainloader):
+    for j, (x_t, q, k, v, o) in enumerate(trainloader):
+        x_t = x_t.to(device)
         q = q.to(device)
         k = k.to(device)
         v = v.to(device)
@@ -82,7 +83,7 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
             
             lr_mask = attn_mask * (~sparse_mask)
             
-            pred_out = net(q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant)
+            pred_out = net(x_t, q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant)
             
             if o_proj is not None:
                 loss_start = heavy_budget + recent_budget
@@ -106,8 +107,9 @@ def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix
     val_loss = 0.0
     baseline_val_loss = 0.0
     net.eval()
-    for j, (q, k, v, o) in enumerate(valloader):
+    for j, (x_t, q, k, v, o) in enumerate(valloader):
         with torch.inference_mode():
+            x_t = x_t.to(device)
             q = q.to(device)
             k = k.to(device)
             v = v.to(device)
@@ -123,7 +125,7 @@ def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix
 
             lr_mask = attn_mask * (~sparse_mask)
             
-            pred_out = net(q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant)
+            pred_out = net(x_t, q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant)
             
             loss_start = heavy_budget + recent_budget
             pred_out = o_proj(pred_out)[:, loss_start:]
@@ -187,17 +189,23 @@ class KernelizedHeadAttention(nn.Module):
         # initialization at 5.0 results in decay post-sigmoid of around 0.99 without being too deep
         # into extremely low gradient territory, seems neutral enough
         if lambda_gating == "learned-constant":
-            self.lambda_val = nn.Parameter(5.0 * torch.ones(1), requires_grad=True)
+            self.W_lambda = nn.Parameter(5.0 * torch.ones(1), requires_grad=True)
         elif lambda_gating == "learned-constant-head":
-            assert not multi_query, "Multi-query not supported for MQA."
-            self.lambda_val = nn.Parameter(5.0 * torch.ones(num_heads), requires_grad=True)
+            assert not multi_query, "Multi-query attention (MQA) not supported by per-head lambdas, defeats the purpose of MQA."
+            self.W_lambda = nn.Parameter(5.0 * torch.ones(num_heads), requires_grad=True)
+        elif lambda_gating == "time-dependent":
+            # based on Mamba-2 formulation of G_t
+            self.alpha = nn.Parameter(1, requires_grad=True)
+            self.W_lambda = nn.Linear(num_heads * dim_head, 1, bias=False)
+        elif lambda_gating == "time-data-dependent":
+            raise NotImplementedError("Time-data-dependent lambda gating not yet implemented.")
 
         self.multi_query = multi_query
         self.act = F.gelu
         self.kernel_f = F.gelu
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, q, k, v, lr_attn_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant):
+    def forward(self, x_t, q, k, v, lr_attn_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant):
         B, S, D = q.shape
             
         # addition of lambda gating-based decay for sparse mask
@@ -205,10 +213,13 @@ class KernelizedHeadAttention(nn.Module):
         if lambda_gating == "constant":
             decay_mask = get_lambda_mask_sparse(lr_attn_mask, lambda_constant)
         elif lambda_gating == "learned-constant" or lambda_gating == "learned-constant-head":
-            decay_mask = get_lambda_mask_sparse(lr_attn_mask, F.sigmoid(self.lambda_val))
+            decay_mask = get_lambda_mask_sparse(lr_attn_mask, F.sigmoid(self.W_lambda))
         elif lambda_gating == "time-dependent":
-            raise NotImplementedError("Time-dependent lambda gating not implemented yet.")
-            
+            lambda_t = torch.exp(-1.0 * F.softplus(self.W_lambda(x_t)) * torch.exp(self.alpha))
+            decay_mask = get_lambda_mask_sparse(lr_attn_mask, lambda_t)
+        elif lambda_gating == "time-data-dependent":
+            raise NotImplementedError("Time-data-dependent lambda gating not yet implemented.")
+
         q = q.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
         if not multi_query:
             k = k.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
@@ -229,7 +240,7 @@ class KernelizedHeadAttention(nn.Module):
             k = torch.abs(self.scalingD) * self.kernel_f(self.kernel_k_mat2(k))
             k = k + self.interaction_k(k) * self.scalingD2
         
-        out = torch.matmul(q.abs(), k.abs().transpose(2, 3))#B, H, S, S
+        out = torch.matmul(q.abs(), k.abs().transpose(2, 3)) # B, H, S, S
         
         if decay_mask is not None:
             out = decay_mask * out
@@ -284,7 +295,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--debug', action='store_true') # for wikitext versus c4 loading
 
-    parser.add_argument('--lambda-gating', type=str, choices=[None, 'constant', 'learned-constant', 'learned-constant-head', 'time-dependent'], default=None)
+    parser.add_argument('--lambda-gating', type=str, choices=[None, 'constant', 'learned-constant', 'learned-constant-head', 'time-dependent', 'time-data-dependent'], default=None)
     parser.add_argument('--lambda-constant', type=float, default=1.0)
 
     parser.add_argument('--attention-score-decay', type=float, default=1.0) # enables attention accumulation decay
@@ -402,7 +413,7 @@ if __name__ == '__main__':
         val_mses = torch.zeros_like(train_mses)
 
         model = model.to(device)
-        qs, ks, vs, os_ = mem_eff_get_activations_layer(model, li, trainloader, batches_to_collect, batch_size, num_heads, seq_len, head_dim, permute=True, half_precision=args.half_precision, multi_query=multi_query)
+        xs, qs, ks, vs, os_ = mem_eff_get_activations_layer(model, li, trainloader, batches_to_collect, batch_size, num_heads, seq_len, head_dim, permute=True, half_precision=args.half_precision, multi_query=multi_query)
         model = model.cpu()
         torch.cuda.empty_cache()
 
@@ -410,13 +421,14 @@ if __name__ == '__main__':
 
         # attempt to reduce size of batches, need to test against baseline
         if args.half_precision:
+            xs.half()
             qs.half()
             ks.half()
             vs.half()
             os_.half()
 
-        train_data = QKVODataset(qs[:int(0.9 * samples)], ks[:int(0.9 * samples)], vs[:int(0.9 * samples)], os_[:int(0.9 * samples)])
-        val_data = QKVODataset(qs[int(0.9 * samples):], ks[int(0.9 * samples):], vs[int(0.9 * samples):], os_[int(0.9 * samples):])
+        train_data = xQKVODataset(xs[:int(0.9 * samples)], qs[:int(0.9 * samples)], ks[:int(0.9 * samples)], vs[:int(0.9 * samples)], os_[:int(0.9 * samples)])
+        val_data = xQKVODataset(xs[int(0.9 * samples):], qs[int(0.9 * samples):], ks[int(0.9 * samples):], vs[int(0.9 * samples):], os_[int(0.9 * samples):])
         print("Train samples:", len(train_data), " Val samples:", len(val_data))
 
         trainloader_net = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=1)
