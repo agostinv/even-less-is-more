@@ -84,25 +84,11 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
 
         # begin offloading to tensor in cpu memory at set time-steps
         if frag == partial_batch - 1:
-            xs_partial.to(device='cpu')
-            xs_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :] = xs_partial
-            xs_partial.to(device=model.model.device)
-
-            qs_partial.to(device='cpu')
-            qs_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :, :] = qs_partial
-            qs_partial.to(device=model.model.device)
-            
-            ks_partial.to(device='cpu')
-            ks_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :, :] = ks_partial
-            ks_partial.to(device=model.model.device)
-            
-            vs_partial.to(device='cpu')
-            vs_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :, :] = vs_partial
-            vs_partial.to(device=model.model.device)
-
-            os_partial.to(device='cpu')
-            os_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :] = os_partial
-            os_partial.to(device=model.model.device)
+            xs_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :] = xs_partial.to(device='cpu')
+            qs_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :, :] = qs_partial.to(device='cpu')
+            ks_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :, :] = ks_partial.to(device='cpu')
+            vs_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :, :] = vs_partial.to(device='cpu')
+            os_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :] = os_partial.to(device='cpu')
 
             frag_offset += 1
 
@@ -114,7 +100,7 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
     ks_all = ks_all.transpose(1, 2).flatten(2)
     vs_all = vs_all.transpose(1, 2).flatten(2)
 
-    datasize = (sys.getsizeof(qs_all.storage()) + sys.getsizeof(ks_all.storage()) + sys.getsizeof(vs_all.storage()) + sys.getsizeof(os_all.storage())) / 1024**3
+    datasize = (sys.getsizeof(xs_all.storage()) + sys.getsizeof(qs_all.storage()) + sys.getsizeof(ks_all.storage()) + sys.getsizeof(vs_all.storage()) + sys.getsizeof(os_all.storage())) / 1024**3
     print('Data size: {:.3f}GB'.format(datasize))
 
     return qs_all, ks_all, vs_all, os_all
