@@ -178,14 +178,24 @@ def get_lambda_mask_sparse(sparse_mask, lambda_val):
     xor_sparse_mask = torch.logical_xor(
                         sparse_mask.to(torch.int),
                         shifted_down_sparse_mask.to(torch.int), 
-                      ).to(torch.int)
+    ).to(torch.int)
 
-    # check for case where lambda_val is set for each attention head
-    if torch.is_tensor(lambda_val) and lambda_val.size(-1) > 1:
-        evict_triggered = lambda_val.view(1, lambda_val.size(-1), 1, 1) * torch.sum(xor_sparse_mask, dim=-1).unsqueeze(-1)
+    # NOTE: final bool() and int() casts cover block-wise cases for evictions,
+    #       this ensures likely compatibility with methods like paged attention
+    evict_triggered = torch.sum(xor_sparse_mask, dim=-1).unsqueeze(-1).bool().int()
+
+    # check for case where lambda_val is dependent on a dimension
+    if torch.is_tensor(lambda_val) and (sum(lambda_val.size()) / lambda_val.dim()) > 1:
+        # then check for attention head dependent or time dependent
+        if lambda_val.dim() == 1:
+            lambda_evict = lambda_val.view(1, lambda_val.size(-1), 1, 1) * evict_triggered
+        else:
+            # in this case, lambda_val should be B x N x 1 coming in, so need to view
+            # with that in mind
+            lambda_evict = lambda_val.view(lambda_val.size(-3), 1, lambda_val.size(-2), lambda_val.size(-1)) * evict_triggered
     else:
-        evict_triggered = lambda_val * torch.sum(xor_sparse_mask, dim=-1).unsqueeze(-1)
-    lambda_mask = evict_triggered * sparse_mask
+        lambda_evict = lambda_val * evict_triggered
+    lambda_mask = lambda_evict * sparse_mask
 
     # need to switch zeros to ones for cumprod then switch back before dividing out a
     # lambda_val to respect initial evictions
@@ -193,9 +203,16 @@ def get_lambda_mask_sparse(sparse_mask, lambda_val):
     lambda_mask = torch.cumprod(lambda_mask, dim=-2) + (1e-6 * sparse_mask)
     lambda_mask[lambda_mask == 1]  = 0
 
-    
-    if torch.is_tensor(lambda_val) and lambda_val.size(-1) > 1:
-        return lambda_mask / lambda_val.view(1, lambda_val.size(-1), 1, 1)
+    # check for case where lambda_val is dependent on a dimension
+    if torch.is_tensor(lambda_val) and (sum(lambda_val.size()) / lambda_val.dim()) > 1:
+        # then check for attention head dependent or time dependent
+        if lambda_val.dim() == 1:
+            return lambda_mask / lambda_val.view(1, lambda_val.size(-1), 1, 1)
+        else:
+            # need to ensure there are no non-zero values in lambda_evict
+            # when using it for final division of initial decay term
+            lambda_evict_div = lambda_evict
+            lambda_evict_div[lambda_evict_div == 0] = 1
+            return lambda_mask / lambda_evict_div
     else:
         return lambda_mask / lambda_val
-

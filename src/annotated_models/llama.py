@@ -105,6 +105,9 @@ class LlamaAttention(nn.Module):
         use_cache: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         int_values = dict()
+        if self.collect:
+            int_values['x_t'] = hidden_states.cpu().detach()
+        
         bsz, q_len, _ = hidden_states.size()
 
         if self.config.pretraining_tp > 1:

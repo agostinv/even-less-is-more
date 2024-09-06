@@ -37,6 +37,7 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
 
     print(f"Model datatype set to {dtype}")
 
+    xs_all = torch.empty((total_size, seq_len, num_heads * head_dim), device="cpu", dtype=dtype)
     qs_all = torch.empty((total_size, num_heads, seq_len, head_dim), device="cpu", dtype=dtype)
     os_all = torch.empty((total_size, seq_len, num_heads * head_dim), device="cpu", dtype=dtype)
     if not multi_query:
@@ -51,6 +52,7 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
     partial_batch = int(batches / frag_factor)
     assert total_size % frag_factor == 0 & batches % frag_factor == 0, "For dataset fragmented loading, the total size must be divisible by the fragmentation factor."
 
+    xs_partial = torch.empty((partial_size, seq_len, num_heads * head_dim), device=model.model.device, dtype=dtype)
     qs_partial = torch.empty((partial_size, num_heads, seq_len, head_dim), device=model.model.device, dtype=dtype)
     os_partial = torch.empty((partial_size, seq_len, num_heads * head_dim), device=model.model.device, dtype=dtype)
     if not multi_query:
@@ -73,6 +75,7 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
             
             inputs = inputs.to(model.model.device)
             outputs, batch_int_values = model(inputs)
+            xs_partial[frag * bsz:(frag + 1) * bsz, :, :] = batch_int_values[layer]['x_t']
             qs_partial[frag * bsz:(frag + 1) * bsz, :, :, :] = batch_int_values[layer]['Q']
             ks_partial[frag * bsz:(frag + 1) * bsz, :, :, :] = batch_int_values[layer]['K']
             vs_partial[frag * bsz:(frag + 1) * bsz, :, :, :] = batch_int_values[layer]['V']
@@ -81,21 +84,11 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
 
         # begin offloading to tensor in cpu memory at set time-steps
         if frag == partial_batch - 1:
-            qs_partial.to(device='cpu')
-            qs_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :, :] = qs_partial
-            qs_partial.to(device=model.model.device)
-            
-            ks_partial.to(device='cpu')
-            ks_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :, :] = ks_partial
-            ks_partial.to(device=model.model.device)
-            
-            vs_partial.to(device='cpu')
-            vs_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :, :] = vs_partial
-            vs_partial.to(device=model.model.device)
-
-            os_partial.to(device='cpu')
-            os_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :] = os_partial
-            os_partial.to(device=model.model.device)
+            xs_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :] = xs_partial.to(device='cpu')
+            qs_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :, :] = qs_partial.to(device='cpu')
+            ks_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :, :] = ks_partial.to(device='cpu')
+            vs_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :, :] = vs_partial.to(device='cpu')
+            os_all[frag_offset * partial_size:(frag_offset + 1) * partial_size, :, :] = os_partial.to(device='cpu')
 
             frag_offset += 1
 
@@ -107,10 +100,10 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
     ks_all = ks_all.transpose(1, 2).flatten(2)
     vs_all = vs_all.transpose(1, 2).flatten(2)
 
-    datasize = (sys.getsizeof(qs_all.storage()) + sys.getsizeof(ks_all.storage()) + sys.getsizeof(vs_all.storage()) + sys.getsizeof(os_all.storage())) / 1024**3
+    datasize = (sys.getsizeof(xs_all.storage()) + sys.getsizeof(qs_all.storage()) + sys.getsizeof(ks_all.storage()) + sys.getsizeof(vs_all.storage()) + sys.getsizeof(os_all.storage())) / 1024**3
     print('Data size: {:.3f}GB'.format(datasize))
 
-    return qs_all, ks_all, vs_all, os_all
+    return xs_all, qs_all, ks_all, vs_all, os_all
 
 
 # inefficient use of RAM due to torch.cat(...)
@@ -159,11 +152,12 @@ def get_activations_layer(model, layer, dataloader, batches, permute=True):
     return qs_all, ks_all, vs_all, os_all
 
 
-class QKVODataset(Dataset):
+class xQKVODataset(Dataset):
     '''
     Simple PyTorch dataset of Q, K, V, and O.
     '''
-    def __init__(self, Q, K, V, O):
+    def __init__(self, x, Q, K, V, O):
+        self.x = x
         self.Q = Q
         self.K = K
         self.V = V
@@ -173,7 +167,7 @@ class QKVODataset(Dataset):
         return len(self.Q)
 
     def __getitem__(self, idx):
-        return self.Q[idx].float(), self.K[idx].float(), self.V[idx].float(), self.O[idx].float()
+        return self.x[idx].float(), self.Q[idx].float(), self.K[idx].float(), self.V[idx].float(), self.O[idx].float()
 
 def get_target_attn(config, q, k, attn_mask):
     target_attn = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(config.hidden_size // config.num_attention_heads)
