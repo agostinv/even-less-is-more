@@ -103,7 +103,7 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
     datasize = (sys.getsizeof(xs_all.storage()) + sys.getsizeof(qs_all.storage()) + sys.getsizeof(ks_all.storage()) + sys.getsizeof(vs_all.storage()) + sys.getsizeof(os_all.storage())) / 1024**3
     print('Data size: {:.3f}GB'.format(datasize))
 
-    return qs_all, ks_all, vs_all, os_all
+    return xs_all, qs_all, ks_all, vs_all, os_all
 
 
 # inefficient use of RAM due to torch.cat(...)

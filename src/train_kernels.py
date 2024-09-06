@@ -195,7 +195,8 @@ class KernelizedHeadAttention(nn.Module):
             self.W_lambda = nn.Parameter(5.0 * torch.ones(num_heads), requires_grad=True)
         elif lambda_gating == "time-dependent":
             # based on Mamba-2 formulation of G_t
-            self.alpha = nn.Parameter(1, requires_grad=True)
+            # init alpha to large negative value for slow start
+            self.alpha = nn.Parameter(-10.0 * torch.ones(1), requires_grad=True)
             self.W_lambda = nn.Linear(num_heads * dim_head, 1, bias=False)
         elif lambda_gating == "time-data-dependent":
             raise NotImplementedError("Time-data-dependent lambda gating not yet implemented.")
