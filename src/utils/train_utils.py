@@ -103,7 +103,7 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
     datasize = (sys.getsizeof(xs_all.storage()) + sys.getsizeof(qs_all.storage()) + sys.getsizeof(ks_all.storage()) + sys.getsizeof(vs_all.storage()) + sys.getsizeof(os_all.storage())) / 1024**3
     print('Data size: {:.3f}GB'.format(datasize))
 
-    return qs_all, ks_all, vs_all, os_all
+    return xs_all, qs_all, ks_all, vs_all, os_all
 
 
 # inefficient use of RAM due to torch.cat(...)
@@ -167,7 +167,7 @@ class xQKVODataset(Dataset):
         return len(self.Q)
 
     def __getitem__(self, idx):
-        return self.x[idx].fload(), self.Q[idx].float(), self.K[idx].float(), self.V[idx].float(), self.O[idx].float()
+        return self.x[idx].float(), self.Q[idx].float(), self.K[idx].float(), self.V[idx].float(), self.O[idx].float()
 
 def get_target_attn(config, q, k, attn_mask):
     target_attn = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(config.hidden_size // config.num_attention_heads)
