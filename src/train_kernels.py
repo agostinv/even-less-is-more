@@ -148,6 +148,8 @@ class KernelizedHeadAttention(nn.Module):
         super().__init__()
         self.dim_ker = dim_ker
         self.num_heads = num_heads
+        self.dim_head = dim_head
+        print(f"Number of heads: {self.num_heads}")
         
         # MLP Layer 1
         a = math.sqrt(6/(dim_head + dim_hid))
@@ -197,7 +199,7 @@ class KernelizedHeadAttention(nn.Module):
             # based on Mamba-2 formulation of G_t
             # init alpha to large negative value for slow start
             self.alpha = nn.Parameter(-10.0 * torch.ones(1), requires_grad=True)
-            self.W_lambda = nn.Linear(num_heads * dim_head, 1, bias=False)
+            self.W_lambda = nn.Linear(self.num_heads * self.dim_head, 1, bias=False)
         elif lambda_gating == "time-data-dependent":
             raise NotImplementedError("Time-data-dependent lambda gating not yet implemented.")
 
@@ -216,6 +218,7 @@ class KernelizedHeadAttention(nn.Module):
         elif lambda_gating == "learned-constant" or lambda_gating == "learned-constant-head":
             decay_mask = get_lambda_mask_sparse(lr_attn_mask, F.sigmoid(self.W_lambda))
         elif lambda_gating == "time-dependent":
+            # here, self.W_lambda is a nn.Linear instead of being parameters we apply sigmoid to
             lambda_t = torch.exp(-1.0 * F.softplus(self.W_lambda(x_t)) * torch.exp(self.alpha))
             decay_mask = get_lambda_mask_sparse(lr_attn_mask, lambda_t)
         elif lambda_gating == "time-data-dependent":
