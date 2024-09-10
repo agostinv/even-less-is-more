@@ -141,22 +141,79 @@ class KernelizedHeadAttention(nn.Module):
             k = torch.abs(self.scalingD) * self.kernel_f(self.kernel_k_mat2(k))
             k = k + self.interaction_k(k) * self.scalingD2
 
+        # alternate forward path to accomodate unique needs for FLA kernels and
+        # non-QK^T manifestation for time-data-dependent lambda gating use
         if self.lambda_gating == "time-data-dependent":
-            # alternate forward path to accomodate unique needs for FLA kernels and
-            # non-QK^T manifestation for time-data-dependent lambda gating use
-            eviction_kv_indices = get_eviction_kv_indices(lr_attn_mask)
-            return self.time_data_dep_forward(q, k, v, lambda_t_data)
-        
-        out = torch.matmul(q.abs(), k.abs().transpose(2, 3)) # B, H, S, S
-        
-        if decay_mask is not None:
-            out = decay_mask * out
-        else:
-            out = lr_attn_mask * out
+            # weird kernel function from LESS, no abs until right now
+            q = q.abs()
+            k = k.abs()
 
-        lr_norms_lse = torch.log(out.sum(dim=-1, keepdim=True) + 1e-6)
-        norm_factor_lse = torch.logaddexp(lr_norms_lse, sparse_norms_lse)
-        out = (torch.log(out + 1e-6) * lr_attn_mask) + ((~lr_attn_mask) * sparse_attn_weights)
-        out = torch.exp(out - norm_factor_lse)
-        out = torch.matmul(out, v).transpose(1, 2).flatten(2)
+            eviction_kv_indices = get_eviction_kv_indices(lr_attn_mask)
+            out_linear, norm = self.time_data_dep_forward(q, k, v, lambda_t_data, eviction_kv_indices)
+            lr_norms_lse = torch.log(norm + 1e-6)
+            norm_factor_lse = torch.logaddexp(lr_norms_lse, sparse_norms_lse)
+            
+            # order shouldn't matter here, we should be able to construct post-matmul with v output before div
+            out = torch.matmul(~lr_attn_mask * sparse_attn_weights, v).transpose(1, 2).flatten(2) + out_linear
+            out = torch.exp(out - norm_factor_lse)
+
+        # standard forward path, also uses decay_mask logic when applicable
+        else:
+            out = torch.matmul(q.abs(), k.abs().transpose(2, 3)) # B, H, S, S
+            
+            if decay_mask is not None:
+                out = decay_mask * out
+            else:
+                out = lr_attn_mask * out
+
+            lr_norms_lse = torch.log(out.sum(dim=-1, keepdim=True) + 1e-6)
+            norm_factor_lse = torch.logaddexp(lr_norms_lse, sparse_norms_lse)
+            out = (torch.log(out + 1e-6) * lr_attn_mask) + ((~lr_attn_mask) * sparse_attn_weights)
+            out = torch.exp(out - norm_factor_lse)
+            out = torch.matmul(out, v).transpose(1, 2).flatten(2)
+
         return out
+    
+
+    def time_data_dep_forward(self, q, k, v, lambda_t_data, eviction_kv_indices):
+        B, S, H, D = q.shape
+
+        # FLA kernels expect B x H x S x D shapes, transposes to fix
+        # B x S x H x D => B x H x S x D
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)        
+
+        # reorder keys and values according to gathered indices ordered
+        # by eviction events
+        k = k[:, :, eviction_kv_indices, :]
+        v = v[:, :, eviction_kv_indices, :]
+
+        if self.multi_query:
+            lambda_t_data = lambda_t_data.view(B, 1, S, self.dim_ker)
+        else:
+            lambda_t_data = lambda_t_data.view(B, self.num_heads, S, self.dim_ker)
+
+        # FLA forward pass, using chunk_gla for now due to issues with triton
+        try:
+            from fla.layers.gla import chunk_gla, fused_recurrent_gla
+        except ImportError:
+            raise ImportError("Time and data-dependent lambda gating requires FLA to be installed for " \
+                              + "efficient training of expanded, recurrent form.")
+        
+        # Triton is slower for single tokens, here for extensibility to inference
+        # code later on
+        if S == 1:
+            output = fused_recurrent_gla(q, k, v, lambda_t_data, initial_state=None)
+        else:
+            output = chunk_gla(q, k, v, lambda_t_data, initial_state=None)
+
+
+        # GLA kernels don't return normalization tensors, as they use LayerNorm instead,
+        # so we need to construct them ourselves
+        k_cum_T = torch.cumsum(k, dim=-2).transpose(2, 3)
+        norm = torch.matmul(q, k_cum_T)
+        norm = torch.diagonal(norm, dim1=-2, dim2=-1).unsqueeze(-1)
+
+        return output, norm
+        
