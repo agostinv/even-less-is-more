@@ -3,7 +3,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-from masks import get_A_mask, get_h2o_mask, get_lambda_mask_sparse
+from masks import get_A_mask, get_h2o_mask, get_lambda_mask_sparse, get_eviction_kv_indices
+
+'''
+    Baseline implementation from LESS augmented with several extra gate-decay features.
+    Currently works with:
+    - constant lambda gating
+    - learned constant lambda gating per layer
+    - learned constant lambda gating per layer and attention head
+    - time-dependent lambda gating
+    - time-data-dependent lambda gating, dependent on FLA (in progress)
+'''
 
 class KernelizedHeadAttention(nn.Module):
     def __init__(self, dim_head, dim_hid, dim_ker, num_heads, dropout, multi_query=False, lambda_gating=None):
@@ -12,13 +22,14 @@ class KernelizedHeadAttention(nn.Module):
         self.num_heads = num_heads
         self.dim_head = dim_head
         self.lambda_gating = lambda_gating
+        self.multi_query = multi_query
         print(f"Number of heads: {self.num_heads}")
         
         # MLP Layer 1
         a = math.sqrt(6/(dim_head + dim_hid))
         self.kernel_q_mat1 = torch.nn.init.uniform_(torch.empty(num_heads, dim_head, dim_hid), a=-a, b=a)
         self.kernel_q_mat1 = nn.Parameter(self.kernel_q_mat1, requires_grad=True)
-        if not multi_query:
+        if not self.multi_query:
             self.kernel_k_mat1 = torch.nn.init.uniform_(torch.empty(num_heads, dim_head, dim_hid), a=-a, b=a)
             self.kernel_k_mat1 = nn.Parameter(self.kernel_k_mat1, requires_grad=True)
         else:
@@ -28,24 +39,23 @@ class KernelizedHeadAttention(nn.Module):
         a = math.sqrt(6/(dim_ker + dim_hid))
         self.kernel_q_mat2 = torch.nn.init.uniform_(torch.empty(num_heads, dim_hid, dim_ker), a=-a, b=a)
         self.kernel_q_mat2 = nn.Parameter(self.kernel_q_mat2, requires_grad=True)
-        if not multi_query:
+        if not self.multi_query:
             self.kernel_k_mat2 = torch.nn.init.uniform_(torch.empty(num_heads, dim_hid, dim_ker), a=-a, b=a)
             self.kernel_k_mat2 = nn.Parameter(self.kernel_k_mat2, requires_grad=True)
         else:
             self.kernel_k_mat2 = nn.Linear(dim_hid, dim_ker, bias=False)
-
         
 
         # MLP Layer 3 (keys only)
         a = math.sqrt(6/(2 * dim_ker))
-        if not multi_query:
+        if not self.multi_query:
             self.interaction_k = torch.nn.init.uniform_(torch.empty(num_heads, dim_ker, dim_ker), a=-a, b=a)
             self.interaction_k = nn.Parameter(self.interaction_k, requires_grad=True)
         else:
             self.interaction_k = nn.Linear(dim_ker, dim_ker, bias=False)
         
         
-        if multi_query:
+        if self.multi_query:
             num_heads = 1
         self.scalingD = nn.Parameter(torch.ones(1, num_heads, 1, dim_ker) * 1e-4, requires_grad=True)
         self.scalingD2 = nn.Parameter(torch.ones(1, num_heads, 1, dim_ker) * 1e-4, requires_grad=True)
@@ -56,8 +66,8 @@ class KernelizedHeadAttention(nn.Module):
         if self.lambda_gating == "learned-constant":
             self.W_lambda = nn.Parameter(5.0 * torch.ones(1), requires_grad=True)
         elif self.lambda_gating == "learned-constant-head":
-            assert not multi_query, "Multi-query attention (MQA) not supported by per-head lambdas, defeats the purpose of MQA."
-            self.W_lambda = nn.Parameter(5.0 * torch.ones(num_heads), requires_grad=True)
+            assert not self.multi_query, "Multi-query attention (MQA) not supported by per-head lambdas, defeats the purpose of MQA."
+            self.W_lambda = nn.Parameter(5.0 * torch.ones(self.num_heads), requires_grad=True)
         elif self.lambda_gating == "time-dependent":
             # based on Mamba-2 formulation of G_t
             # init alpha to large negative value for slow start
@@ -71,12 +81,22 @@ class KernelizedHeadAttention(nn.Module):
                                   + "efficient training of expanded, recurrent form.")
 
             # low rank W_lambda set up with hardcoded constant based on Gated Linear Attention
-            self.W_lambda = nn.Sequential(
-                nn.Linear(dim_hid, 16, bias=False),
-                nn.Linear(16, dim_ker, bias=False)
-            )
+            # NOTE: this can be implemented per-head with a rearrange step or just per layer, we
+            #       are implement per head following GLA
+            if self.multi_query:
+                self.W_lambda = nn.Sequential(
+                    nn.Linear(self.dim_hid, 16, bias=False),
+                    nn.Linear(16, self.dim_ker, bias=False)
+                )
+            else:
+                self.W_lambda = nn.Sequential(
+                    nn.Linear(self.dim_hid, 16, bias=False),
+                    nn.Linear(16, self.num_heads * self.dim_ker, bias=False)
+                )
+        else:
+            raise NotImplementedError
 
-        self.multi_query = multi_query
+        self.self.multi_query = multi_query
         self.act = F.gelu
         self.kernel_f = F.gelu
         self.dropout = nn.Dropout(dropout)
@@ -95,10 +115,14 @@ class KernelizedHeadAttention(nn.Module):
             lambda_t = torch.exp(-1.0 * F.softplus(self.W_lambda(x_t)) * torch.exp(self.alpha))
             decay_mask = get_lambda_mask_sparse(lr_attn_mask, lambda_t)
         elif self.lambda_gating == "time-data-dependent":
-            raise NotImplementedError("Time-data-dependent lambda gating not yet implemented.")
+            # implementation is identical to GLA, but they never exponentiate out of
+            # logarithmic space for some reason?
+            lambda_t_data = F.logsigmoid(self.W_lambda(x_t)) / 16
+        else:
+            raise NotImplementedError
 
         q = q.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
-        if not multi_query:
+        if not self.multi_query:
             k = k.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
             v = v.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
         else:
@@ -108,7 +132,7 @@ class KernelizedHeadAttention(nn.Module):
         q = self.act(self.dropout(torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat1)))
         q = self.kernel_f(torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat2))
         
-        if not self.multi_query:
+        if not self.self.multi_query:
             k = self.act(self.dropout(torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat1)))
             k = torch.abs(self.scalingD) * self.kernel_f(torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat2))
             k = k + torch.einsum('bhsd,hde->bhse', k, self.interaction_k) * self.scalingD2
@@ -116,6 +140,12 @@ class KernelizedHeadAttention(nn.Module):
             k = self.act(self.dropout(self.kernel_k_mat1(k)))
             k = torch.abs(self.scalingD) * self.kernel_f(self.kernel_k_mat2(k))
             k = k + self.interaction_k(k) * self.scalingD2
+
+        if self.lambda_gating == "time-data-dependent":
+            # alternate forward path to accomodate unique needs for FLA kernels and
+            # non-QK^T manifestation for time-data-dependent lambda gating use
+            eviction_kv_indices = get_eviction_kv_indices(lr_attn_mask)
+            return self.time_data_dep_forward(q, k, v, lambda_t_data)
         
         out = torch.matmul(q.abs(), k.abs().transpose(2, 3)) # B, H, S, S
         
