@@ -142,7 +142,7 @@ class KernelizedHeadAttention(nn.Module):
             k = torch.abs(self.scalingD) * self.kernel_f(self.kernel_k_mat2(k))
             k = k + self.interaction_k(k) * self.scalingD2
 
-        # alternate forward path to accomodate unique needs for FLA kernels and
+        # ALTERNATE forward path to accomodate unique needs for FLA kernels and
         # non-QK^T manifestation for time-data-dependent lambda gating use
         if self.lambda_gating == "time-data-dependent":
             # weird kernel function from LESS, no abs until right now
@@ -150,7 +150,19 @@ class KernelizedHeadAttention(nn.Module):
             k = k.abs()
 
             eviction_kv_indices = get_eviction_kv_indices(lr_attn_mask)
-            out_linear, norm = self.time_data_dep_forward(q, k, v, lambda_t_data, eviction_kv_indices)
+            
+            # necessary to avoid mismatch with reordered keys and values later
+            offset = S - eviction_kv_indices.size(0)
+            q_offset = q[..., offset:, :]
+
+            out_linear, norm = self.time_data_dep_forward(
+                    q=q_offset,
+                    k=k,
+                    v=v,
+                    lambda_t_data=lambda_t_data,
+                    eviction_kv_indices=eviction_kv_indices
+            )
+            
             lr_norms_lse = torch.log(norm + 1e-6)
             norm_factor_lse = torch.logaddexp(lr_norms_lse, sparse_norms_lse)
             
@@ -158,7 +170,7 @@ class KernelizedHeadAttention(nn.Module):
             out = torch.matmul(~lr_attn_mask * sparse_attn_weights, v).transpose(1, 2).flatten(2) + out_linear
             out = torch.exp(out - norm_factor_lse)
 
-        # standard forward path, also uses decay_mask logic when applicable
+        # STANDARD forward path, also uses decay_mask logic when applicable
         else:
             out = torch.matmul(q.abs(), k.abs().transpose(2, 3)) # B, H, S, S
             
