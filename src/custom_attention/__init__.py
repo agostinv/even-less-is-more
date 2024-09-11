@@ -1,1 +1,1 @@
-from KernelizedHeadAttention import KernelizedHeadAttention
+from custom_attention.KernelizedHeadAttention import KernelizedHeadAttention
