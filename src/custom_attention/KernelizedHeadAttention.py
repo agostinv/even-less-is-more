@@ -178,6 +178,7 @@ class KernelizedHeadAttention(nn.Module):
 
     def time_data_dep_forward(self, q, k, v, lambda_t_data, eviction_kv_indices):
         B, S, H, D = q.shape
+        B, S, H_k, D_k = k.shape
 
         # FLA kernels expect B x H x S x D shapes, transposes to fix
         # B x S x H x D => B x H x S x D
@@ -191,9 +192,9 @@ class KernelizedHeadAttention(nn.Module):
         v = v[:, :, eviction_kv_indices, :]
 
         if self.multi_query:
-            lambda_t_data = lambda_t_data.view(B, 1, S, self.dim_ker)
+            lambda_t_data = lambda_t_data.view(B, 1, S, D_k)
         else:
-            lambda_t_data = lambda_t_data.view(B, self.num_heads, S, self.dim_ker)
+            lambda_t_data = lambda_t_data.view(B, H_k, S, D_k)
 
         # FLA forward pass, using chunk_gla for now due to issues with triton
         try:
@@ -212,9 +213,9 @@ class KernelizedHeadAttention(nn.Module):
 
         # GLA kernels don't return normalization tensors, as they use LayerNorm instead,
         # so we need to construct them ourselves
-        lambda_t_shifted = torch.ones_like(lambda_t)
-        lambda_t_shifted[:, :, 1:, :] = lambda_t[:, :, :-1, :]
-        k_for_norm = lambda_t_shifted * 
+        lambda_t_shifted = torch.ones_like(lambda_t_data)
+        lambda_t_shifted[:, :, 1:, :] = torch.exp(lambda_t_data[:, :, :-1, :])
+        k_for_norm = lambda_t_shifted * k
 
         k_cum_T = torch.cumsum(k_for_norm, dim=-2).transpose(2, 3)
         norm = torch.matmul(q, k_cum_T)
