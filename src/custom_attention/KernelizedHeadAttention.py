@@ -20,6 +20,7 @@ class KernelizedHeadAttention(nn.Module):
         super().__init__()
         self.dim_ker = dim_ker
         self.num_heads = num_heads
+        self.dim_hid = dim_hid
         self.dim_head = dim_head
         self.lambda_gating = lambda_gating
         self.multi_query = multi_query
@@ -96,7 +97,7 @@ class KernelizedHeadAttention(nn.Module):
         else:
             raise NotImplementedError
 
-        self.self.multi_query = multi_query
+        self.multi_query = multi_query
         self.act = F.gelu
         self.kernel_f = F.gelu
         self.dropout = nn.Dropout(dropout)
@@ -132,7 +133,7 @@ class KernelizedHeadAttention(nn.Module):
         q = self.act(self.dropout(torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat1)))
         q = self.kernel_f(torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat2))
         
-        if not self.self.multi_query:
+        if not self.multi_query:
             k = self.act(self.dropout(torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat1)))
             k = torch.abs(self.scalingD) * self.kernel_f(torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat2))
             k = k + torch.einsum('bhsd,hde->bhse', k, self.interaction_k) * self.scalingD2
@@ -204,14 +205,18 @@ class KernelizedHeadAttention(nn.Module):
         # Triton is slower for single tokens, here for extensibility to inference
         # code later on
         if S == 1:
-            output = fused_recurrent_gla(q, k, v, lambda_t_data, initial_state=None)
+            output, _ = fused_recurrent_gla(q, k, v, lambda_t_data, initial_state=None)
         else:
-            output = chunk_gla(q, k, v, lambda_t_data, initial_state=None)
+            output, _ = chunk_gla(q, k, v, lambda_t_data, initial_state=None)
 
 
         # GLA kernels don't return normalization tensors, as they use LayerNorm instead,
         # so we need to construct them ourselves
-        k_cum_T = torch.cumsum(k, dim=-2).transpose(2, 3)
+        lambda_t_shifted = torch.ones_like(lambda_t)
+        lambda_t_shifted[:, :, 1:, :] = lambda_t[:, :, :-1, :]
+        k_for_norm = lambda_t_shifted * 
+
+        k_cum_T = torch.cumsum(k_for_norm, dim=-2).transpose(2, 3)
         norm = torch.matmul(q, k_cum_T)
         norm = torch.diagonal(norm, dim1=-2, dim2=-1).unsqueeze(-1)
 

@@ -11,18 +11,22 @@ from custom_attention import KernelizedHeadAttention
 
     Unlike some other tests, this test should be run on a GPU compatible with CUDA.
 '''
+
 class TestKHAForTDDwFLA(unittest.TestCase):
     def setUp(self):
-        self.B = 2  # Batch size
-        self.S = 3  # Sequence length
-        self.H = 2  # Number of heads
-        self.D = 4  # Dimension per head
+        assert torch.cuda.is_available(), "This test expects a CUDA-compatible GPU when run."
 
-        self.q = torch.randn(self.B, self.S, self.H, self.D)
-        self.k = torch.randn(self.B, self.S, self.H, self.D)
-        self.v = torch.randn(self.B, self.S, self.H, self.D)
-        self.lambda_t_data = torch.randn(self.B, self.S, self.H * self.D)
-        self.eviction_kv_indices = torch.arange(0, self.S, 1)[torch.randperm(self.S)]
+        # minimum size is expected of 16 of self.S and self.D
+        self.B = 2
+        self.S = 16
+        self.H = 2
+        self.D = 16
+
+        self.q = torch.randn(self.B, self.S, self.H, self.D, device="cuda")
+        self.k = torch.randn(self.B, self.S, self.H, self.D, device="cuda")
+        self.v = torch.randn(self.B, self.S, self.H, self.D, device="cuda")
+        self.lambda_t_data = torch.randn(self.B, self.S, self.H * self.D, device="cuda")
+        self.eviction_kv_indices = torch.arange(0, self.S, device="cuda")[torch.randperm(self.S)]
 
         self.kha = KernelizedHeadAttention(
             dim_head=self.D,
@@ -56,13 +60,20 @@ class TestKHAForTDDwFLA(unittest.TestCase):
         recurrent_state = torch.zeros(B, H, D, D, device=q.device)
         out = torch.zeros_like(q)
         for i in range(S):
-            lambda_i = lambda_t_data[:, :, i, :].repeat(1, 1, D).view(B, H, D, D)
-            recurrent_state = lambda_i * recurrent_state + torch.matmul(k[:, :, i, :].transpose(2, 3), v[:, :, i, :])
-            out[:, :, i, :] = torch.matmul(q[:, :, i, :], recurrent_state)
+            q_temp = q[:, :, i, :].unsqueeze(2)
+            k_temp = k[:, :, i, :].unsqueeze(2)
+            v_temp = v[:, :, i, :].unsqueeze(2)
+            lambda_i = lambda_t_data[:, :, i, :].unsqueeze(2).repeat(1, 1, D, 1)
+            recurrent_state = lambda_i * recurrent_state + torch.matmul(k_temp.transpose(2, 3), v_temp)
+            out[:, :, i, :] = torch.matmul(q_temp, recurrent_state).squeeze(2)
 
-        # GLA kernels don't return normalization tensors, as they use LayerNorm instead,
+        # GLA kernels don't return normalization tensors, as LA usually uses LayerNorm instead,
         # so we need to construct them ourselves
-        k_cum_T = torch.cumsum(k, dim=-2).transpose(2, 3)
+        lambda_t_shifted = torch.ones_like(lambda_t)
+        lambda_t_shifted[:, :, 1:, :] = lambda_t[:, :, :-1, :]
+        k_for_norm = lambda_t_shifted * 
+
+        k_cum_T = torch.cumsum(k_for_norm, dim=-2).transpose(2, 3)
         norm = torch.matmul(q, k_cum_T)
         norm = torch.diagonal(norm, dim1=-2, dim2=-1).unsqueeze(-1)
 
@@ -70,7 +81,6 @@ class TestKHAForTDDwFLA(unittest.TestCase):
 
 
     def test_KHA_for_TDD_w_FLA(self):
-        # Call the method
         output, norm = self.kha.time_data_dep_forward(
             self.q, self.k, self.v, self.lambda_t_data, self.eviction_kv_indices
         )
