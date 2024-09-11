@@ -74,7 +74,7 @@ def mem_eff_get_activations_layer(model, layer, dataloader, batches, bsz, num_he
         with torch.inference_mode(): 
             
             inputs = inputs.to(model.model.device)
-            outputs, batch_int_values = model(inputs)
+            outputs, batch_int_values = model(inputs, use_cache=False)
             xs_partial[frag * bsz:(frag + 1) * bsz, :, :] = batch_int_values[layer]['x_t']
             qs_partial[frag * bsz:(frag + 1) * bsz, :, :, :] = batch_int_values[layer]['Q']
             ks_partial[frag * bsz:(frag + 1) * bsz, :, :, :] = batch_int_values[layer]['K']

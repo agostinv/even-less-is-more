@@ -7,7 +7,7 @@ import math
 from typing import Optional, Tuple
 import warnings
 
-from transformers.models.falcon.modeling_falcon import FalconLinear, FalconRotaryEmbedding, FalconLinearScalingRotaryEmbedding, FalconDynamicNTKScalingRotaryEmbedding
+from transformers.models.falcon.modeling_falcon import FalconLinear, FalconRotaryEmbedding, FalconLinearScalingRotaryEmbedding, FalconDynamicNTKScalingRotaryEmbedding, apply_rotary_pos_emb
 
 
 class Annotated_Falcon(nn.Module):
@@ -66,7 +66,9 @@ class FalconAttention(nn.Module):
                 f" {self.num_heads})."
             )
 
-        self.maybe_rotary = self._init_rope() if config.rotary else lambda q, k, t, p: (q, k)
+        self.maybe_rotary = self._init_rope() if config.rotary else lambda q, p : q
+        if not config.rotary:
+            print(f"WARNING: unintended results may stem from not using RoPe in this repository's current state.")
 
         # Layer-wise attention scaling
         self.inv_norm_factor = 1.0 / math.sqrt(self.head_dim)
@@ -206,7 +208,15 @@ class FalconAttention(nn.Module):
         value_layer = value_layer.transpose(1, 2).reshape(batch_size * num_kv_heads, query_length, self.head_dim)
 
         past_kv_length = 0 if layer_past is None else layer_past[0].shape[1]
-        query_layer, key_layer = self.maybe_rotary(query_layer, key_layer, past_kv_length, position_ids)
+        
+        # updated for transformer version bump
+        kv_seq_len = key_layer.shape[-2]
+        if layer_past is not None:
+            kv_seq_len += layer_past[0].shape[-2]
+        cos, sin = self.maybe_rotary(value_layer, seq_len=kv_seq_len)
+        query_layer, key_layer = apply_rotary_pos_emb(query_layer, key_layer, cos, sin, position_ids)
+        query_layer = query_layer.squeeze(0)
+        key_layer = key_layer.squeeze(0)
 
         if layer_past is not None:
             past_key, past_value = layer_past

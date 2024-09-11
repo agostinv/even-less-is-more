@@ -249,6 +249,7 @@ if __name__ == '__main__':
     head_dim = config.hidden_size // config.num_attention_heads
     if seq_len == -1:
         seq_len = config.max_position_embeddings
+    print(f"Sanity check for transformer version update: seq_len is set to {seq_len}")
 
     # debugging is faster with wt
     if not debug:
