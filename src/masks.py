@@ -212,20 +212,28 @@ def get_lambda_mask_sparse(sparse_mask, lambda_val):
 # sole purpose is to provide indices of keys/values as they are evicted across
 # time so that they can be reordered during time-data-dependent forward passes
 def get_eviction_kv_indices(sparse_mask):
+    B = sparse_mask.size(0) 
     evict_triggered = get_eviction_triggered(sparse_mask)
+
 
     # produces a series of two-element tensors acting as indices, then we split to
     # just get key indices for evictions in order across time
     evict_indices = torch.nonzero(evict_triggered, as_tuple=False)
-
+    
     # last column post-split should contain reordered key indices, squeeze to
     # remove extra dimension post-split 
-    return evict_indices.split(1, dim=-1)[-1].squeeze()
+    evict_indices = evict_indices.split(1, dim=-1)[-1].squeeze()
 
+    assert evict_indices.size(0) % B == 0, \
+            "Even division of triggered token length by batch size required. " + \
+            "Eviction decisions are not allowed to be dependent on batch, "    + \
+            "i.e. the same number of tokens must be evicted per-batch."
+    evict_indices = evict_indices.view(B, evict_indices.size(0) // B)
+
+    return evict_indices # (B x S_evicted)
 
 # provides the eviction events as what amounts to a binary mask
 def get_eviction_triggered(sparse_mask):
-    len = sparse_mask.size(-2)
     shifted_down_sparse_mask = torch.zeros_like(sparse_mask)
     shifted_down_sparse_mask[:, :, 1:, :] = sparse_mask[:, :, :-1, :]
 

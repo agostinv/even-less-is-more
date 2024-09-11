@@ -25,6 +25,9 @@ class KernelizedHeadAttention(nn.Module):
         self.lambda_gating = lambda_gating
         self.multi_query = multi_query
         print(f"Number of heads: {self.num_heads}")
+        print(f"Hidden dimension: {self.dim_hid}")
+        print(f"Head dimension: {self.dim_head}")
+        print(f"Kernel dimension: {self.dim_ker}")
         
         # MLP Layer 1
         a = math.sqrt(6/(dim_head + dim_hid))
@@ -86,12 +89,12 @@ class KernelizedHeadAttention(nn.Module):
             #       are implement per head following GLA
             if self.multi_query:
                 self.W_lambda = nn.Sequential(
-                    nn.Linear(self.dim_hid, 16, bias=False),
+                    nn.Linear(self.num_heads * self.dim_head, 16, bias=False),
                     nn.Linear(16, self.dim_ker, bias=False)
                 )
             else:
                 self.W_lambda = nn.Sequential(
-                    nn.Linear(self.dim_hid, 16, bias=False),
+                    nn.Linear(self.num_heads * self.dim_head, 16, bias=False),
                     nn.Linear(16, self.num_heads * self.dim_ker, bias=False)
                 )
         else:
@@ -109,7 +112,7 @@ class KernelizedHeadAttention(nn.Module):
         decay_mask = None
         if self.lambda_gating == "constant":
             decay_mask = get_lambda_mask_sparse(lr_attn_mask, lambda_constant)
-        elif self.lambda_gating == "learned-constant" or lambda_gating == "learned-constant-head":
+        elif self.lambda_gating == "learned-constant" or self.lambda_gating == "learned-constant-head":
             decay_mask = get_lambda_mask_sparse(lr_attn_mask, F.sigmoid(self.W_lambda))
         elif self.lambda_gating == "time-dependent":
             # here, self.W_lambda is a nn.Linear instead of being parameters we apply sigmoid to
@@ -154,12 +157,13 @@ class KernelizedHeadAttention(nn.Module):
             # necessary to avoid mismatch with reordered keys and values later
             offset = S - eviction_kv_indices.size(0)
             q_offset = q[..., offset:, :]
+            lambda_t_data_offset = lambda_t_data[:, offset:, :]
 
             out_linear, norm = self.time_data_dep_forward(
                     q=q_offset,
                     k=k,
                     v=v,
-                    lambda_t_data=lambda_t_data,
+                    lambda_t_data=lambda_t_data_offset,
                     eviction_kv_indices=eviction_kv_indices
             )
             
@@ -189,24 +193,20 @@ class KernelizedHeadAttention(nn.Module):
     
 
     def time_data_dep_forward(self, q, k, v, lambda_t_data, eviction_kv_indices, recurrent_override=False):
-        B, S, H, D = q.shape
-        B, S, H_k, D_k = k.shape
-
-        # FLA kernels expect B x H x S x D shapes, transposes to fix
-        # B x S x H x D => B x H x S x D
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)        
+        B, H, S_q, D = q.shape
+        _, H_k, S_k, D_k = k.shape
 
         # reorder keys and values according to gathered indices ordered
-        # by eviction events
-        k = k[:, :, eviction_kv_indices, :]
-        v = v[:, :, eviction_kv_indices, :]
+        # by eviction events, check related test to verify correctness of this 
+        # behavior if in doubt
+        eviction_kv_indices = eviction_kv_indices.unsqueeze(-1).expand(-1, -1, D_k)
+        k = k.gather(-2, eviction_kv_indices)
+        v = v.gather(-2, eviction_kv_indices)
 
         if self.multi_query:
-            lambda_t_data = lambda_t_data.view(B, 1, S, D_k)
+            lambda_t_data = lambda_t_data.view(B, 1, S_q, D_k)
         else:
-            lambda_t_data = lambda_t_data.view(B, H_k, S, D_k)
+            lambda_t_data = lambda_t_data.view(B, H_k, S_q, D_k)
 
         # FLA forward pass, using chunk_gla for now due to issues with triton
         try:
@@ -217,7 +217,7 @@ class KernelizedHeadAttention(nn.Module):
         
         # Triton is slower for single tokens, here for extensibility to inference
         # code later on
-        if S == 1 or recurrent_override:
+        if S_q == 1 or recurrent_override:
             output, _ = fused_recurrent_gla(q, k, v, lambda_t_data, initial_state=None)
         else:
             output, _ = chunk_gla(q, k, v, lambda_t_data, initial_state=None)
