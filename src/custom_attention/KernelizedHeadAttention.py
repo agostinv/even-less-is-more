@@ -176,7 +176,7 @@ class KernelizedHeadAttention(nn.Module):
         return out
     
 
-    def time_data_dep_forward(self, q, k, v, lambda_t_data, eviction_kv_indices):
+    def time_data_dep_forward(self, q, k, v, lambda_t_data, eviction_kv_indices, recurrent_override=False):
         B, S, H, D = q.shape
         B, S, H_k, D_k = k.shape
 
@@ -205,7 +205,7 @@ class KernelizedHeadAttention(nn.Module):
         
         # Triton is slower for single tokens, here for extensibility to inference
         # code later on
-        if S == 1:
+        if S == 1 or recurrent_override:
             output, _ = fused_recurrent_gla(q, k, v, lambda_t_data, initial_state=None)
         else:
             output, _ = chunk_gla(q, k, v, lambda_t_data, initial_state=None)
@@ -217,8 +217,9 @@ class KernelizedHeadAttention(nn.Module):
         lambda_t_shifted[:, :, 1:, :] = torch.exp(lambda_t_data[:, :, :-1, :])
         k_for_norm = lambda_t_shifted * k
 
+        # scaling factor included here, GLA kernels do it by default
         k_cum_T = torch.cumsum(k_for_norm, dim=-2).transpose(2, 3)
-        norm = torch.matmul(q, k_cum_T)
+        norm = torch.matmul(q * D_k ** -0.5, k_cum_T)
         norm = torch.diagonal(norm, dim1=-2, dim2=-1).unsqueeze(-1)
 
         return output, norm

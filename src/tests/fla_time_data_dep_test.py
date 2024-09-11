@@ -5,6 +5,8 @@ from custom_attention import KernelizedHeadAttention
 import triton
 import triton.language as tl
 
+import torch.nn.functional as F
+
 '''
     Logic in KernelizedHeadAttention for time-data-dependent lambda gating is
     non-trivial and basically requires a test to try and test for weird behavior.
@@ -14,7 +16,7 @@ import triton.language as tl
 
     Unlike some other tests, this test should be run on a GPU compatible with CUDA.
 '''
-    
+
 @triton.jit
 def precision_error(lambda_in, lambda_out, stride):
     m = tl.program_id(0)
@@ -40,7 +42,8 @@ class TestKHAForTDDwFLA(unittest.TestCase):
         self.q = torch.randn(self.B, self.S, self.H, self.D, device="cuda")
         self.k = torch.randn(self.B, self.S, self.H, self.D, device="cuda")
         self.v = torch.randn(self.B, self.S, self.H, self.D, device="cuda")
-        self.lambda_t_data = torch.log(torch.randn(self.B, self.S, self.H * self.D, device="cuda").abs()) / 16
+        self.lambda_t_data = F.logsigmoid(torch.randn(self.B, self.S, self.H * self.D, device="cuda")) / 16
+
         self.eviction_kv_indices = torch.arange(0, self.S, device="cuda")[torch.randperm(self.S)]
 
         self.q = self.q.abs()
@@ -85,9 +88,9 @@ class TestKHAForTDDwFLA(unittest.TestCase):
             q_temp = q[:, :, i, :].unsqueeze(2)
             k_temp = k[:, :, i, :].unsqueeze(2)
             v_temp = v[:, :, i, :].unsqueeze(2)
-            lambda_temp = lambda_t_data[:, :, i, :].unsqueeze(2)
-            lambda_i = torch.exp(lambda_temp)
-            recurrent_state = lambda_i * recurrent_state + torch.matmul(k_temp.transpose(2, 3), v_temp)
+            lambda_i = lambda_t_data[:, :, i, :].unsqueeze(2).exp().transpose(2, 3) # B x H x D_k x 1
+
+            recurrent_state = (lambda_i * recurrent_state) + torch.matmul(k_temp.transpose(2, 3), v_temp)
             out[:, :, i, :] = torch.matmul(q_temp, recurrent_state).squeeze(2)
 
         # GLA kernels don't return normalization tensors, as LA usually uses LayerNorm instead,
@@ -115,9 +118,10 @@ class TestKHAForTDDwFLA(unittest.TestCase):
 
         self.assertTrue(torch.allclose(lambda_tl, lambda_base, atol=1e-6),
                         msg=f'\nExpected \n{lambda_base}, \n\ngot \n{lambda_tl}')
-       
+      
+        # generate output and norm
         output, norm = self.kha.time_data_dep_forward(
-            self.q, self.k, self.v, self.lambda_t_data, self.eviction_kv_indices
+            self.q, self.k, self.v, self.lambda_t_data, self.eviction_kv_indices, recurrent_override=True
         )
 
         output_ref, norm_ref = self.equivalent_fwd_pass_logic(
@@ -125,9 +129,9 @@ class TestKHAForTDDwFLA(unittest.TestCase):
         )
 
         # Ensure that the output and normalization tensors are close
-        self.assertTrue(torch.allclose(output, output_ref, atol=1e-3),
+        self.assertTrue(torch.allclose(output, output_ref, atol=1e-4),
                         msg=f'\nExpected \n{output_ref}, \n\ngot \n{output}')
-        self.assertTrue(torch.allclose(norm, norm_ref, atol=1e-3),
+        self.assertTrue(torch.allclose(norm, norm_ref, atol=1e-4),
                         msg=f'\nExpected \n{norm_ref}, \n\ngot \n{norm}')
 
 
