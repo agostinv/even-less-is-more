@@ -105,9 +105,10 @@ class KernelizedHeadAttention(nn.Module):
         self.kernel_f = F.gelu
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x_t, q, k, v, lr_attn_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant):
+    def forward(self, x_t, q, k, v, lr_attn_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant, half_precision=False):
         B, S, D = q.shape
-            
+        H = self.num_heads
+
         # addition of lambda gating-based decay for sparse mask
         decay_mask = None
         if self.lambda_gating == "constant":
@@ -153,26 +154,27 @@ class KernelizedHeadAttention(nn.Module):
             k = k.abs()
 
             eviction_kv_indices = get_eviction_kv_indices(lr_attn_mask)
-            
-            # necessary to avoid mismatch with reordered keys and values later
-            offset = S - eviction_kv_indices.size(0)
-            q_offset = q[..., offset:, :]
-            lambda_t_data_offset = lambda_t_data[:, offset:, :]
 
-            out_linear, norm = self.time_data_dep_forward(
-                    q=q_offset,
-                    k=k,
-                    v=v,
-                    lambda_t_data=lambda_t_data_offset,
-                    eviction_kv_indices=eviction_kv_indices
+            out_linear, norm, offset = self.time_data_dep_forward(
+                q=q,
+                k=k,
+                v=v,
+                lambda_t_data=lambda_t_data,
+                eviction_kv_indices=eviction_kv_indices,
+                half_precision=half_precision,
+                fused_recurrent_override=True,
             )
-            
+         
             lr_norms_lse = torch.log(norm + 1e-6)
+            lr_norms_lse = torch.cat((float('-inf') * torch.ones(B, H, offset, 1, device=lr_norms_lse.device), lr_norms_lse), -2)
             norm_factor_lse = torch.logaddexp(lr_norms_lse, sparse_norms_lse)
-            
+          
+            out_linear = torch.cat((float('-inf') * torch.ones(B, H, offset, D // H, device=out_linear.device), out_linear), -2)
+
             # order shouldn't matter here, we should be able to construct post-matmul with v output before div
-            out = torch.matmul(~lr_attn_mask * sparse_attn_weights, v).transpose(1, 2).flatten(2) + out_linear
+            out = torch.matmul(~lr_attn_mask * sparse_attn_weights, v) + out_linear
             out = torch.exp(out - norm_factor_lse)
+            out = out.transpose(1, 2).flatten(2)
 
         # STANDARD forward path, also uses decay_mask logic when applicable
         else:
@@ -192,32 +194,72 @@ class KernelizedHeadAttention(nn.Module):
         return out
     
 
-    def time_data_dep_forward(self, q, k, v, lambda_t_data, eviction_kv_indices, recurrent_override=False):
+    def time_data_dep_forward(self, q, k, v, lambda_t_data, eviction_kv_indices, half_precision=False, fused_recurrent_override=False):
         B, H, S_q, D = q.shape
         _, H_k, S_k, D_k = k.shape
+        _, _, _, D_v = v.shape 
 
+        assert eviction_kv_indices.size(-1) % H_k == 0, \
+            "Even division of triggered token length by attn. heads required. "        + \
+            "Eviction decisions are not allowed to be dependent on attn. heads, "      + \
+            "i.e. the same number of tokens must be evicted per-head. Non-factor for " + \
+            "multi-query attention."
+
+        # B x (S_reduct. * H_k) => B x S_reduct. x H_k, where S_reduct. also accounts for offset for query
+        eviction_kv_indices = eviction_kv_indices.unsqueeze(1).view(B, H_k, eviction_kv_indices.size(-1) // H_k)
+        _, _, S_reduct = eviction_kv_indices.shape 
+
+        
+        '''
+            Necessary to avoid mismatch with reordered keys and values later
+            NOTE: This does NOT work for extremely adaptive eviction policies,
+                  i.e. ones that might not evict at every time-step. To account
+                  for such cases, a secondary tensor containing query time-steps
+                  where evictions occurred would be necessary.
+        '''
+        S_offset = S_q - S_reduct
+        q = q[..., S_offset:, :]
+        lambda_t_data = lambda_t_data[:, S_offset:, :]
+
+        
         # reorder keys and values according to gathered indices ordered
         # by eviction events, check related test to verify correctness of this 
         # behavior if in doubt
-        eviction_kv_indices = eviction_kv_indices.unsqueeze(-1).expand(-1, -1, D_k)
-        k = k.gather(-2, eviction_kv_indices)
-        v = v.gather(-2, eviction_kv_indices)
-
+        eviction_k_indices = eviction_kv_indices.unsqueeze(-1).expand(-1, -1, -1, D_k) # B x S_reduct. x H_k => B x S_reduct. x H x D_k_
+        eviction_v_indices = eviction_kv_indices.unsqueeze(-1).expand(-1, -1, -1, D_v) # B x S_reduct. x H_k => B x S_reduct. x H x D_k_
+        k = k.gather(-2, eviction_k_indices)
+        v = v.gather(-2, eviction_v_indices)
+        
         if self.multi_query:
-            lambda_t_data = lambda_t_data.view(B, 1, S_q, D_k)
+            lambda_t_data = lambda_t_data.view(B, 1, S_reduct, D_k)
         else:
-            lambda_t_data = lambda_t_data.view(B, H_k, S_q, D_k)
+            lambda_t_data = lambda_t_data.view(B, H_k, S_reduct, D_k)
 
+        
         # FLA forward pass, using chunk_gla for now due to issues with triton
         try:
             from fla.layers.gla import chunk_gla, fused_recurrent_gla
         except ImportError:
             raise ImportError("Time and data-dependent lambda gating requires FLA to be installed for " \
                               + "efficient training of expanded, recurrent form.")
-        
+      
+        # weird case where amp doesn't autocast before GLA kernels, where it doesn't catch
+        # that it needs to autocast
+        if half_precision:
+            q = q.half()
+            k = k.half()
+            v = v.half()
+            lambda_t_data = lambda_t_data.half()
+
+        # GLA kernels, not unexpectedly, do not account for GQA or MQA
+        if self.multi_query:
+            k = k.expand(-1, H, -1, -1)
+            v = v.expand(-1, H, -1, -1)
+            lambda_t_data = lambda_t_data.expand(-1, H, -1, -1)
+
         # Triton is slower for single tokens, here for extensibility to inference
         # code later on
-        if S_q == 1 or recurrent_override:
+        if S_q == 1 or fused_recurrent_override:
             output, _ = fused_recurrent_gla(q, k, v, lambda_t_data, initial_state=None)
         else:
             output, _ = chunk_gla(q, k, v, lambda_t_data, initial_state=None)
@@ -234,5 +276,5 @@ class KernelizedHeadAttention(nn.Module):
         norm = torch.matmul(q * D_k ** -0.5, k_cum_T)
         norm = torch.diagonal(norm, dim1=-2, dim2=-1).unsqueeze(-1)
 
-        return output, norm
+        return output, norm, S_offset
         

@@ -32,19 +32,25 @@ def precision_error(lambda_in, lambda_out, stride):
 class TestKHAForTDDwFLA(unittest.TestCase):
     def setUp(self):
         assert torch.cuda.is_available(), "This test expects a CUDA-compatible GPU when run."
+        
+        # toggle to check between implementations
+        self.multi_query = True
 
         # minimum size is expected of 16 of self.S and self.D
         self.B = 2
-        self.S = 16
-        self.H = 2
+        self.S = 2048
+        self.H = 32
         self.D = 16
 
-        self.q = torch.randn(self.B, self.S, self.H, self.D, device="cuda")
-        self.k = torch.randn(self.B, self.S, self.H, self.D, device="cuda")
-        self.v = torch.randn(self.B, self.S, self.H, self.D, device="cuda")
-        self.lambda_t_data = F.logsigmoid(torch.randn(self.B, self.S, self.H * self.D, device="cuda")) / 16
+        self.H_k = 1 if self.multi_query else H
+        self.D_v = 128
 
-        self.eviction_kv_indices = torch.arange(0, self.S, device="cuda")[torch.randperm(self.S)]
+        self.q = torch.randn(self.B, self.H, self.S, self.D, device="cuda")
+        self.k = torch.randn(self.B, self.H_k, self.S, self.D, device="cuda")
+        self.v = torch.randn(self.B, self.H_k, self.S, self.D_v, device="cuda")
+        self.lambda_t_data = F.logsigmoid(torch.randn(self.B, self.S, self.H_k * self.D, device="cuda")) / 16
+
+        self.eviction_kv_indices = torch.arange(0, self.S, device="cuda")[torch.randperm(self.S)].expand(self.B, -1).repeat(1, self.H_k) # B x (H x S)
 
         self.q = self.q.abs()
         self.k = self.k.abs()
@@ -55,40 +61,55 @@ class TestKHAForTDDwFLA(unittest.TestCase):
             dim_ker=self.D,
             num_heads=self.H,
             dropout=0.0,
-            multi_query=False,
+            multi_query=self.multi_query,
             lambda_gating="time-data-dependent",
         )
 
 
     def equivalent_fwd_pass_logic(self, q, k, v, lambda_t_data, eviction_kv_indices, multi_query=False):
-        B, S, H, D = q.size()
-      
+        B, H, S, D = q.size()
+        _, H_k, _, _ = k.size()
+        _, _, _, D_v = v.size()
+
         # GLA kernels execute on this no matter what we do, we would have to multiply
         # the query by this factor to remove the scaling
         q = q * q.size(-1) ** -0.5
 
-        # transpose for consistency with FLA expectations, even though
-        # we don't use it here
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)        
 
+        assert eviction_kv_indices.size(-1) % H_k == 0, \
+            "Even division of triggered token length by attn. heads required. "        + \
+            "Eviction decisions are not allowed to be dependent on attn. heads, "      + \
+            "i.e. the same number of tokens must be evicted per-head. Non-factor for " + \
+            "multi-query attention."
+
+        # B x (S_reduct. * H) => B x S_reduct. x H, where S_reduct. also accounts for offset for query
+        eviction_kv_indices = eviction_kv_indices.unsqueeze(1).view(B, H_k, eviction_kv_indices.size(-1) // H_k)
+        
+        
         # reorder keys and values according to gathered indices ordered
-        # by eviction events
-        k = k[:, :, self.eviction_kv_indices, :]
-        v = v[:, :, self.eviction_kv_indices, :]
+        # by eviction events, check related test to verify correctness of this 
+        # behavior if in doubt
+        eviction_k_indices = eviction_kv_indices.unsqueeze(-1).expand(-1, -1, -1, D) # B x S_reduct. x H => B x S_reduct. x H x D_k
+        eviction_v_indices = eviction_kv_indices.unsqueeze(-1).expand(-1, -1, -1, D_v) # B x S_reduct. x H => B x S_reduct. x H x D_v
+        k = k.gather(-2, eviction_k_indices)
+        v = v.gather(-2, eviction_v_indices)
 
         # not testing multi_query here, so simple view
-        lambda_t_data = lambda_t_data.view(B, H, S, D)
+        lambda_t_data = lambda_t_data.view(B, H_k, S, D)
+        
+        if self.multi_query:
+            k = k.expand(-1, H, -1, -1)
+            v = v.expand(-1, H, -1, -1)
+            lambda_t_data = lambda_t_data.expand(-1, H, -1, -1)
 
         # initialize and begin inefficient linear attention
-        recurrent_state = torch.zeros(B, H, D, D, device=q.device)
-        out = torch.zeros_like(q)
+        recurrent_state = torch.zeros(B, H, D, D_v, device=q.device)
+        out = torch.zeros(B, H, S, D_v, device=q.device)
         for i in range(S):
-            q_temp = q[:, :, i, :].unsqueeze(2)
-            k_temp = k[:, :, i, :].unsqueeze(2)
-            v_temp = v[:, :, i, :].unsqueeze(2)
-            lambda_i = lambda_t_data[:, :, i, :].unsqueeze(2).exp().transpose(2, 3) # B x H x D_k x 1
+            q_temp = q[:, :, i, :].unsqueeze(-2)
+            k_temp = k[:, :, i, :].unsqueeze(-2)
+            v_temp = v[:, :, i, :].unsqueeze(-2)
+            lambda_i = lambda_t_data[:, :, i, :].unsqueeze(-1).exp() # B x H x D_k x 1
 
             recurrent_state = (lambda_i * recurrent_state) + torch.matmul(k_temp.transpose(2, 3), v_temp)
             out[:, :, i, :] = torch.matmul(q_temp, recurrent_state).squeeze(2)
@@ -113,19 +134,19 @@ class TestKHAForTDDwFLA(unittest.TestCase):
         
         # double check for no weird tl precision issues
         lambda_tl = torch.zeros_like(self.lambda_t_data)
-        precision_error[(self.B * self.S * self.H * self.D,)](self.lambda_t_data, lambda_tl, 1)
+        precision_error[(self.B * self.S * self.H_k * self.D,)](self.lambda_t_data, lambda_tl, 1)
         lambda_base = torch.exp(self.lambda_t_data)
 
         self.assertTrue(torch.allclose(lambda_tl, lambda_base, atol=1e-6),
                         msg=f'\nExpected \n{lambda_base}, \n\ngot \n{lambda_tl}')
       
         # generate output and norm
-        output, norm = self.kha.time_data_dep_forward(
+        output, norm, _ = self.kha.time_data_dep_forward(
             self.q, self.k, self.v, self.lambda_t_data, self.eviction_kv_indices, recurrent_override=True
         )
 
         output_ref, norm_ref = self.equivalent_fwd_pass_logic(
-            self.q, self.k, self.v, self.lambda_t_data, self.eviction_kv_indices
+            self.q, self.k, self.v, self.lambda_t_data, self.eviction_kv_indices, multi_query=self.multi_query
         )
 
         # Ensure that the output and normalization tensors are close

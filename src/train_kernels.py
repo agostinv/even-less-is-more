@@ -62,7 +62,7 @@ criterion_mse = torch.nn.MSELoss()
 scaler = torch.cuda.amp.GradScaler()
 
 
-def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, lambda_constant, attention_score_decay):
+def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, lambda_constant, attention_score_decay=1.0, half_precision=False):
 
     net.train()
     train_loss = 0.0
@@ -74,7 +74,7 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
         v = v.to(device)
         o = o.to(device)
 
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast():
             target_out, target_attn, target_attn_weights = get_target_attn_out(config, q, k, v, attn_mask, multi_query)
 
             if fix_heavy_to_initial_tokens:
@@ -84,7 +84,7 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
             
             lr_mask = attn_mask * (~sparse_mask)
             
-            pred_out = net(x_t, q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant)
+            pred_out = net(x_t, q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant, half_precision)
             
             if o_proj is not None:
                 loss_start = heavy_budget + recent_budget
@@ -103,7 +103,7 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
     return train_loss
 
   
-def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, baseline_hh, baseline_recent, lambda_constant, attention_score_decay):
+def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, baseline_hh, baseline_recent, lambda_constant, attention_score_decay=1.0, half_precision=False):
 
     val_loss = 0.0
     baseline_val_loss = 0.0
@@ -122,7 +122,7 @@ def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix
                 baseline_sparse_out, _, _ = A_attn_out(config, q, k, v, target_attn_weights, baseline_hh, baseline_recent, multi_query)
             else:
                 sparse_attn_weights, sparse_norms_lse, sparse_mask = h2o_attn_weights(target_attn_weights, heavy_budget, recent_budget, multi_query, attention_score_decay)
-                baseline_sparse_out, _, _ = h2o_attn_out(config, q, k, v, target_attn_weights, baseline_hh, baseline_recent, multi_query)
+                baseline_sparse_out, _, _ = h2o_attn_out(config, q, k, v, target_attn_weights, baseline_hh, baseline_recent, multi_query, attention_score_decay)
 
             lr_mask = attn_mask * (~sparse_mask)
             
@@ -349,6 +349,7 @@ if __name__ == '__main__':
                 multi_query,
                 lambda_constant,
                 attention_score_decay,
+                half_precision=args.half_precision,
             )
             val_loss, baseline_loss = validate(
                 net, 
@@ -364,6 +365,7 @@ if __name__ == '__main__':
                 baseline_recent,
                 lambda_constant,
                 attention_score_decay,
+                half_precision=args.half_precision,
             )
             
             train_mses[epoch] = train_loss
