@@ -97,8 +97,6 @@ class KernelizedHeadAttention(nn.Module):
                     nn.Linear(self.num_heads * self.dim_head, 16, bias=False),
                     nn.Linear(16, self.num_heads * self.dim_ker, bias=False)
                 )
-        else:
-            raise NotImplementedError
 
         self.multi_query = multi_query
         self.act = F.gelu
@@ -123,8 +121,6 @@ class KernelizedHeadAttention(nn.Module):
             # implementation is identical to GLA, but they never exponentiate out of
             # logarithmic space for some reason?
             lambda_t_data = F.logsigmoid(self.W_lambda(x_t)) / 16
-        else:
-            raise NotImplementedError
 
         q = q.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
         if not self.multi_query:
