@@ -161,15 +161,23 @@ class KernelizedHeadAttention(nn.Module):
                 fused_recurrent_override=True,
             )
          
+            norm = torch.cat((torch.zeros(B, H, offset, 1, device=norm.device), norm), -2)
             lr_norms_lse = torch.log(norm + 1e-6)
-            lr_norms_lse = torch.cat((float('-inf') * torch.ones(B, H, offset, 1, device=lr_norms_lse.device), lr_norms_lse), -2)
             norm_factor_lse = torch.logaddexp(lr_norms_lse, sparse_norms_lse)
-          
-            out_linear = torch.cat((float('-inf') * torch.ones(B, H, offset, D // H, device=out_linear.device), out_linear), -2)
+         
+            # cat and normalize for addition, may not matter as offset values should get their loss filtered
+            # out_linear is post QK^TV so it can contain negative values, can't be converted to log space
+            out_linear = torch.cat((torch.zeros(B, H, offset, D // H, device=out_linear.device), out_linear), -2)
+            out_linear = out_linear / torch.exp(norm_factor_lse)
 
-            # order shouldn't matter here, we should be able to construct post-matmul with v output before div
-            out = torch.matmul(~lr_attn_mask * sparse_attn_weights, v) + out_linear
-            out = torch.exp(out - norm_factor_lse)
+            # numerical stability requires us to normalize before we generate output with value
+            # this is only post QK^T so log space is okay
+            # sparse_attn_weights is in log-space, but we need to normalize NOW not later
+            sparse_attn_weights = torch.log(torch.exp(sparse_attn_weights) + 1e-6) # soften min values a bit
+            out_sparse = (~lr_attn_mask) * torch.exp(sparse_attn_weights - norm_factor_lse)
+            out_sparse = torch.matmul(out_sparse, v)
+
+            out = out_sparse + out_linear
             out = out.transpose(1, 2).flatten(2)
 
         # STANDARD forward path, also uses decay_mask logic when applicable
@@ -254,23 +262,20 @@ class KernelizedHeadAttention(nn.Module):
             lambda_t_data = lambda_t_data.expand(-1, H, -1, -1)
 
         # Triton is slower for single tokens, here for extensibility to inference
-        # code later on
-        if S_q == 1 or fused_recurrent_override:
+        # code later on, calculate numerator
+        if S_reduct == 1 or fused_recurrent_override:
             output, _ = fused_recurrent_gla(q, k, v, lambda_t_data, initial_state=None)
         else:
             output, _ = chunk_gla(q, k, v, lambda_t_data, initial_state=None)
 
 
-        # GLA kernels don't return normalization tensors, as they use LayerNorm instead,
-        # so we need to construct them ourselves
-        lambda_t_shifted = torch.ones_like(lambda_t_data)
-        lambda_t_shifted[:, :, 1:, :] = torch.exp(lambda_t_data[:, :, :-1, :])
-        k_for_norm = lambda_t_shifted * k
-
-        # scaling factor included here, GLA kernels do it by default
-        k_cum_T = torch.cumsum(k_for_norm, dim=-2).transpose(2, 3)
-        norm = torch.matmul(q * D_k ** -0.5, k_cum_T)
-        norm = torch.diagonal(norm, dim1=-2, dim2=-1).unsqueeze(-1)
+        # we use GLA kernels to also generate the denominator, just need 
+        # a tensor.ones(B, H, S_reduct, 1) to act as value matrix
+        summation_value = torch.ones(B, H, S_reduct, 1, device=q.device)
+        if S_reduct == 1 or fused_recurrent_override:
+            norm, _ = fused_recurrent_gla(q, k, summation_value, lambda_t_data, initial_state=None)
+        else:
+            norm, _ = chunk_gla(q, k, summation_value, lambda_t_data, initial_state=None)
 
         return output, norm, S_offset
         

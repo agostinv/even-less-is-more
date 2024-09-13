@@ -29,8 +29,8 @@ def local_heavy_hitter_mask_nonoverlap(attn_weights, heavy_budget, recent_budget
     attention_decay_mask = attention_decay_mask / attention_score_decay
 
     accumulated_attention_score = torch.cumsum(tmp_attn, dim=-2) #(head, keys)
-    accumulated_attention_score[:,:,:,heavy_budget+recent_budget+padding_length:] = 0
-    accumulated_attention_score[:,:,:,:padding_length] = 0
+    accumulated_attention_score[:, :, :, heavy_budget+recent_budget+padding_length:] = 0
+    accumulated_attention_score[:, :, :, :padding_length] = 0
 
     # decay accumulated scores so far
     accumulated_attention_score = accumulated_attention_score * attention_decay_mask

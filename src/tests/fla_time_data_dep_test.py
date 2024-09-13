@@ -109,22 +109,17 @@ class TestKHAForTDDwFLA(unittest.TestCase):
             q_temp = q[:, :, i, :].unsqueeze(-2)
             k_temp = k[:, :, i, :].unsqueeze(-2)
             v_temp = v[:, :, i, :].unsqueeze(-2)
+
+            # account for summation tensor in case of norm
+            if v_temp.dim() < 4:
+                v_vemp = v_temp.unsqueeze(-1)
+
             lambda_i = lambda_t_data[:, :, i, :].unsqueeze(-1).exp() # B x H x D_k x 1
 
             recurrent_state = (lambda_i * recurrent_state) + torch.matmul(k_temp.transpose(2, 3), v_temp)
             out[:, :, i, :] = torch.matmul(q_temp, recurrent_state).squeeze(2)
 
-        # GLA kernels don't return normalization tensors, as LA usually uses LayerNorm instead,
-        # so we need to construct them ourselves
-        lambda_t_shifted = torch.ones_like(lambda_t_data)
-        lambda_t_shifted[:, :, 1:, :] = torch.exp(lambda_t_data[:, :, :-1, :])
-        k_for_norm = lambda_t_shifted * k
-
-        k_cum_T = torch.cumsum(k_for_norm, dim=-2).transpose(2, 3)
-        norm = torch.matmul(q, k_cum_T)
-        norm = torch.diagonal(norm, dim1=-2, dim2=-1).unsqueeze(-1)
-
-        return out, norm
+        return out
 
 
     # tests exp precision
@@ -142,11 +137,15 @@ class TestKHAForTDDwFLA(unittest.TestCase):
       
         # generate output and norm
         output, norm, _ = self.kha.time_data_dep_forward(
-            self.q, self.k, self.v, self.lambda_t_data, self.eviction_kv_indices, recurrent_override=True
+            self.q, self.k, self.v, self.lambda_t_data, self.eviction_kv_indices, fused_recurrent_override=True
         )
 
-        output_ref, norm_ref = self.equivalent_fwd_pass_logic(
+        summation_value = torch.ones(self.B, self.H_k, self.S, 1, device=self.q.device)
+        output_ref = self.equivalent_fwd_pass_logic(
             self.q, self.k, self.v, self.lambda_t_data, self.eviction_kv_indices, multi_query=self.multi_query
+        )
+        norm_ref = self.equivalent_fwd_pass_logic(
+            self.q, self.k, summation_value, self.lambda_t_data, self.eviction_kv_indices, multi_query=self.multi_query
         )
 
         # Ensure that the output and normalization tensors are close
