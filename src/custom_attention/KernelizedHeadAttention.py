@@ -97,13 +97,15 @@ class KernelizedHeadAttention(nn.Module):
                     nn.Linear(self.num_heads * self.dim_head, 16, bias=False),
                     nn.Linear(16, self.num_heads * self.dim_ker, bias=False)
                 )
+            nn.init.xavier_uniform_(self.W_lambda[0].weight, gain=2 ** -2.5)
+            nn.init.xavier_uniform_(self.W_lambda[1].weight, gain=2 ** -2.5)
 
         self.multi_query = multi_query
         self.act = F.gelu
         self.kernel_f = F.gelu
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x_t, q, k, v, lr_attn_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant, half_precision=False):
+    def forward(self, x_t, q, k, v, lr_attn_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant, half_precision=False, batch_idx = None):
         B, S, D = q.shape
         H = self.num_heads
 
@@ -163,22 +165,37 @@ class KernelizedHeadAttention(nn.Module):
          
             norm = torch.cat((torch.zeros(B, H, offset, 1, device=norm.device), norm), -2)
             lr_norms_lse = torch.log(norm + 1e-6)
-            norm_factor_lse = torch.logaddexp(lr_norms_lse, sparse_norms_lse)
-         
+
+            # numerical stability fix
+            if half_precision:
+                norm_factor_lse = torch.logaddexp(lr_norms_lse, sparse_norms_lse.float()) # .clamp(-5, 25)  about 6.7e-3 out of log space, needed for edge cases
+            else:
+                norm_factor_lse = torch.logaddexp(lr_norms_lse, sparse_norms_lse) # .clamp(-5, 25)  about 6.7e-3 out of log space, needed for edge cases
+                
+            
             # cat and normalize for addition, may not matter as offset values should get their loss filtered
             # out_linear is post QK^TV so it can contain negative values, can't be converted to log space
+            # NOTE: this can cause exposive gradients, so we have to calculate in log space in some fashion
+            #       given that, we can normalize the magnitudes of each element in out_linear instead
             out_linear = torch.cat((torch.zeros(B, H, offset, D // H, device=out_linear.device), out_linear), -2)
-            out_linear = out_linear / torch.exp(norm_factor_lse)
+            out_linear_signs = torch.sign(out_linear)
+            out_linear_log_abs = torch.log(torch.abs(out_linear) + 1e-6)
+            out_linear_post_norm = out_linear_signs * torch.exp(out_linear_log_abs - norm_factor_lse)
+
+            # numerical stability fixes, catches case where we were previously in full precision to avoid
+            # some inf values during linear attention
+            if half_precision:
+                out_linear_post_norm = out_linear_post_norm.half()
 
             # numerical stability requires us to normalize before we generate output with value
-            # this is only post QK^T so log space is okay
-            # sparse_attn_weights is in log-space, but we need to normalize NOW not later
+            # this is only post QK^T so log space immediately works
             sparse_attn_weights = torch.log(torch.exp(sparse_attn_weights) + 1e-6) # soften min values a bit
             out_sparse = (~lr_attn_mask) * torch.exp(sparse_attn_weights - norm_factor_lse)
-            out_sparse = torch.matmul(out_sparse, v)
+            out_sparse_post = torch.matmul(out_sparse, v)
 
-            out = out_sparse + out_linear
+            out = out_sparse_post + out_linear_post_norm
             out = out.transpose(1, 2).flatten(2)
+
 
         # STANDARD forward path, also uses decay_mask logic when applicable
         else:
@@ -196,7 +213,7 @@ class KernelizedHeadAttention(nn.Module):
             out = torch.matmul(out, v).transpose(1, 2).flatten(2)
 
         return out
-    
+
 
     def time_data_dep_forward(self, q, k, v, lambda_t_data, eviction_kv_indices, half_precision=False, fused_recurrent_override=False):
         B, H, S_q, D = q.shape
@@ -249,11 +266,13 @@ class KernelizedHeadAttention(nn.Module):
       
         # weird case where amp doesn't autocast before GLA kernels, where it doesn't catch
         # that it needs to autocast
+        # NOTE: due to numerical stability problems later, we need to work in full precision
+        #       unless bf16 is available
         if half_precision:
-            q = q.half()
-            k = k.half()
-            v = v.half()
-            lambda_t_data = lambda_t_data.half()
+            q = q.float()
+            k = k.float()
+            v = v.float()
+            lambda_t_data = lambda_t_data.float()
 
         # GLA kernels, not unexpectedly, do not account for GQA or MQA
         if self.multi_query:

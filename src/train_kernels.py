@@ -59,7 +59,7 @@ get_annotated_layers_functions = {
 mq_models = ['falcon']
 
 criterion_mse = torch.nn.MSELoss()
-scaler = torch.cuda.amp.GradScaler()
+scaler = torch.amp.GradScaler()
 
 
 def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, lambda_constant, attention_score_decay=1.0, half_precision=False):
@@ -75,6 +75,7 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
         o = o.to(device)
 
         with torch.amp.autocast(device_type=device):
+            print(f"Training on batch {j} of {len(trainloader)}")
             target_out, target_attn, target_attn_weights = get_target_attn_out(config, q, k, v, attn_mask, multi_query)
 
             if fix_heavy_to_initial_tokens:
@@ -84,7 +85,7 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
             
             lr_mask = attn_mask * (~sparse_mask)
             
-            pred_out = net(x_t, q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant, half_precision)
+            pred_out = net(x_t, q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant, half_precision, batch_idx=j)
             
             if o_proj is not None:
                 loss_start = heavy_budget + recent_budget
@@ -95,6 +96,11 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
             
         train_loss += loss.item() 
         scaler.scale(loss).backward()
+
+        # attempting to deal with untenable weight growth in certain configurations
+        # scaler.unscale_(optimizer)
+        # torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
+
         scaler.step(optimizer)
         scaler.update() 
         optimizer.zero_grad()
