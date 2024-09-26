@@ -164,6 +164,10 @@ class LlamaAttention(nn.Module):
             int_values['V'] = value_states.cpu().detach()
         
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+                
+        # supports transformer version bump to 4.44.0
+        #if attention_mask is None:
+        attention_mask = torch.triu(torch.ones((bsz, 1, q_len, kv_seq_len)), diagonal=1).to(attn_weights.device) * -1e3
 
         if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
             raise ValueError(

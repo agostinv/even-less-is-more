@@ -75,7 +75,6 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
         o = o.to(device)
 
         with torch.amp.autocast(device_type=device):
-            print(f"Training on batch {j} of {len(trainloader)}")
             target_out, target_attn, target_attn_weights = get_target_attn_out(config, q, k, v, attn_mask, multi_query)
 
             if fix_heavy_to_initial_tokens:

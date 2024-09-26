@@ -7,8 +7,14 @@ import math
 from typing import Optional, Tuple
 import warnings
 
-from transformers.models.falcon.modeling_falcon import FalconLinear, FalconRotaryEmbedding, FalconLinearScalingRotaryEmbedding, FalconDynamicNTKScalingRotaryEmbedding, apply_rotary_pos_emb
-
+from transformers.models.falcon.modeling_falcon import (
+    FalconLinear,
+    FalconRotaryEmbedding, 
+    FalconLinearScalingRotaryEmbedding, 
+    FalconDynamicNTKScalingRotaryEmbedding, 
+    rotate_half
+    #apply_rotary_pos_emb,
+)
 
 class Annotated_Falcon(nn.Module):
     def __init__(self, model, layers=None):
@@ -66,7 +72,8 @@ class FalconAttention(nn.Module):
                 f" {self.num_heads})."
             )
 
-        self.maybe_rotary = self._init_rope() if config.rotary else lambda q, p : q
+        # self.maybe_rotary = self._init_rope() if config.rotary else lambda q, p : q
+        self.maybe_rotary = self._init_rope() if config.rotary else lambda q, k, t, p: (q, k)
         if not config.rotary:
             print(f"WARNING: unintended results may stem from not using RoPe in this repository's current state.")
 
@@ -87,7 +94,21 @@ class FalconAttention(nn.Module):
         self.num_kv_heads = config.num_kv_heads if (self.new_decoder_architecture or not self.multi_query) else 1
         self.collect = True
 
+    # adding temporary override for 4.35.2 RoPE for Falcon
     def _init_rope(self):
+        if self.config.rope_scaling is None:
+            rotary_emb = OldFalconRotaryEmbeddings(
+                self.head_dim,
+                base=self.config.rope_theta,
+                max_position_embeddings=self.config.max_position_embeddings,
+            )
+            return rotary_emb
+        else:
+            raise NotImplementedError("Non-RoPE scaling is not properly implemented in this repository's current state. "  + \
+                                        "This is essentially all due to needing to version bump to `transformers` v4.44.2 from " + \
+                                        "v4.35.2." \
+            )
+
         if self.config.rope_scaling is None:
             rotary_emb = FalconRotaryEmbedding(
                 self.head_dim,
@@ -210,13 +231,15 @@ class FalconAttention(nn.Module):
         past_kv_length = 0 if layer_past is None else layer_past[0].shape[1]
         
         # updated for transformer version bump
-        kv_seq_len = key_layer.shape[-2]
-        if layer_past is not None:
-            kv_seq_len += layer_past[0].shape[-2]
-        cos, sin = self.maybe_rotary(value_layer, seq_len=kv_seq_len)
-        query_layer, key_layer = apply_rotary_pos_emb(query_layer, key_layer, cos, sin, position_ids)
-        query_layer = query_layer.squeeze(0)
-        key_layer = key_layer.squeeze(0)
+        # kv_seq_len = key_layer.shape[-2]
+        # if layer_past is not None:
+        #     kv_seq_len += layer_past[0].shape[-2]
+        # cos, sin = self.maybe_rotary(value_layer, seq_len=kv_seq_len)
+        # query_layer, key_layer = apply_rotary_pos_emb(query_layer, key_layer, cos, sin, position_ids)
+        # query_layer = query_layer.squeeze(0)
+        # key_layer = key_layer.squeeze(0)
+
+        query_layer, key_layer = self.maybe_rotary(query_layer, key_layer, past_kv_length, position_ids)
 
         if layer_past is not None:
             past_key, past_value = layer_past
@@ -242,7 +265,8 @@ class FalconAttention(nn.Module):
             int_values['V'] = value_layer_.cpu().detach()
 
         if alibi is None:
-            if hasattr(F, "scaled_dot_product_attention") and not output_attentions:
+            # override, do NOT use sdpa from torch
+            if not output_attentions:
                 # TODO: deprecate this once we add FA2 support in Falcon
                 # logger.warning_once(
                 #     "The current implementation of Falcon calls `torch.scaled_dot_product_attention` directly, this will be deprecated in the"
@@ -251,12 +275,15 @@ class FalconAttention(nn.Module):
                 # )
 
                 attn_output = F.scaled_dot_product_attention(
-                    query_layer_, key_layer_, value_layer_, attention_mask, 0.0, is_causal=False
+                    query_layer_, key_layer_, value_layer_, attention_mask, 0.0, is_causal=self.is_causal and attention_mask is None and query_length > 1
                 )
                 attention_scores = None
             else:
                 attention_scores = query_layer_ @ key_layer_.transpose(-1, -2)
                 attention_scores /= math.sqrt(self.head_dim)
+
+                if attention_mask is None:
+                    attention_mask = torch.triu(torch.ones((1, 1, query_length, query_length)), diagonal=1).to(attention_scores.device) * -1e3
 
                 attention_scores = F.softmax(attention_scores + attention_mask, dim=-1, dtype=hidden_states.dtype)
                 attn_output = attention_scores @ value_layer_
@@ -269,7 +296,7 @@ class FalconAttention(nn.Module):
 
             if self.collect:
                 int_values['O'] = output_tensor.cpu().detach()
-            
+
             self.int_values = int_values
 
             if output_attentions:
@@ -320,3 +347,75 @@ class FalconAttention(nn.Module):
                 return output_tensor, present, attention_probs
             else:
                 return output_tensor, present
+
+class OldFalconRotaryEmbeddings(nn.Module):
+    """Implementation of RotaryEmbedding from GPT-NeoX.
+    This implementation is designed to operate on queries and keys that are compatible with `[batch_size,
+    n_heads_per_partition, seq_len, head_dim]` (e.g. MinGPTAttention format).
+    """
+
+    def __init__(self, head_dim: int, base=10000, max_position_embeddings=2048):
+        super().__init__()
+        self.base = base
+        self.max_position_embeddings = max_position_embeddings
+        inv_freq = 1.0 / (self.base ** (torch.arange(0, head_dim, 2).float() / head_dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.head_dim = head_dim
+        self.seq_len_cached = -1
+        self.cos_cached: torch.Tensor | None = None
+        self.sin_cached: torch.Tensor | None = None
+
+    def _set_cos_sin_cache(self, seq_len, device, dtype):
+        self.seq_len_cached = seq_len
+        t = torch.arange(seq_len, device=device).to(dtype)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1).to(device)
+
+        if dtype in [torch.float16, torch.bfloat16]:
+            emb = emb.float()
+
+        self.cos_cached = emb.cos()
+        self.sin_cached = emb.sin()
+
+        self.cos_cached = self.cos_cached.type(dtype)
+        self.sin_cached = self.sin_cached.type(dtype)
+
+    def cos_sin(
+        self, seq_len: int, past_key_values_length: int, position_ids: torch.Tensor, device="cpu", dtype=torch.bfloat16
+    ) -> torch.Tensor:
+        total_length = seq_len + past_key_values_length
+        if total_length > self.seq_len_cached:
+            self._set_cos_sin_cache(total_length, device, dtype)
+
+        # the cached tensors need to update their devices (for example, after we change the model's device)
+        self.cos_cached = self.cos_cached.to(device)
+        self.sin_cached = self.sin_cached.to(device)
+
+        # Gather cos, sin at the designated position ids
+        cos = self.cos_cached[position_ids]  # [bs, seq_len, dim]
+        sin = self.sin_cached[position_ids]  # [bs, seq_len, dim]
+        return cos, sin
+
+    def forward(self, query, key, past_key_values_length, position_ids):
+        _, seq_len, _ = query.shape
+        cos, sin = self.cos_sin(seq_len, past_key_values_length, position_ids, query.device, query.dtype)
+        # Query and key's shapes are [bs * num_heads, seq_len, dim], might need manual expansion. Ifs and elses used to
+        # avoid unnecessary repeat_interleave operations.
+        query_expansion_factor = int(query.shape[0] / cos.shape[0])
+        if query_expansion_factor > 1:
+            query_cos = torch.repeat_interleave(cos, query_expansion_factor, dim=0)
+            query_sin = torch.repeat_interleave(sin, query_expansion_factor, dim=0)
+        else:
+            query_cos, query_sin = cos, sin
+
+        key_expansion_factor = int(key.shape[0] / cos.shape[0])
+        if key_expansion_factor > 1:
+            if key_expansion_factor != query_expansion_factor:
+                key_cos = torch.repeat_interleave(cos, key_expansion_factor, dim=0)
+                key_sin = torch.repeat_interleave(sin, key_expansion_factor, dim=0)
+            else:
+                key_cos, key_sin = query_cos, query_sin
+        else:
+            key_cos, key_sin = cos, sin
+
+        return (query * query_cos) + (rotate_half(query) * query_sin), (key * key_cos) + (rotate_half(key) * key_sin)
