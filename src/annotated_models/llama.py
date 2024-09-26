@@ -103,6 +103,8 @@ class LlamaAttention(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.45
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         int_values = dict()
         if self.collect:
@@ -137,12 +139,15 @@ class LlamaAttention(nn.Module):
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
         kv_seq_len = key_states.shape[-2]
-        if past_key_value is not None:
+        if past_key_value is not None and len(past_key_value) > 0:
             kv_seq_len += past_key_value[0].shape[-2]
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        #cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        
+        # part of transformer version bump
+        cos, sin = self.rotary_emb(value_states, position_ids=position_ids)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
-        if past_key_value is not None:
+        if past_key_value is not None and len(past_key_value) > 0:
             # reuse k, v, self_attention
             key_states = torch.cat([past_key_value[0], key_states], dim=2)
             value_states = torch.cat([past_key_value[1], value_states], dim=2)
@@ -159,6 +164,10 @@ class LlamaAttention(nn.Module):
             int_values['V'] = value_states.cpu().detach()
         
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+                
+        # supports transformer version bump to 4.44.0
+        #if attention_mask is None:
+        attention_mask = torch.triu(torch.ones((bsz, 1, q_len, kv_seq_len)), diagonal=1).to(attn_weights.device) * -1e3
 
         if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
             raise ValueError(

@@ -19,6 +19,7 @@ from utils.train_utils import *
 import math
 from tqdm import tqdm
 
+from custom_attention import KernelizedHeadAttention
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -58,10 +59,10 @@ get_annotated_layers_functions = {
 mq_models = ['falcon']
 
 criterion_mse = torch.nn.MSELoss()
-scaler = torch.cuda.amp.GradScaler()
+scaler = torch.amp.GradScaler()
 
 
-def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, lambda_constant, attention_score_decay):
+def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, lambda_constant, attention_score_decay=1.0, half_precision=False):
 
     net.train()
     train_loss = 0.0
@@ -73,7 +74,7 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
         v = v.to(device)
         o = o.to(device)
 
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast(device_type=device):
             target_out, target_attn, target_attn_weights = get_target_attn_out(config, q, k, v, attn_mask, multi_query)
 
             if fix_heavy_to_initial_tokens:
@@ -83,7 +84,7 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
             
             lr_mask = attn_mask * (~sparse_mask)
             
-            pred_out = net(x_t, q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant)
+            pred_out = net(x_t, q, k, v, lr_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant, half_precision, batch_idx=j)
             
             if o_proj is not None:
                 loss_start = heavy_budget + recent_budget
@@ -94,6 +95,11 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
             
         train_loss += loss.item() 
         scaler.scale(loss).backward()
+
+        # attempting to deal with untenable weight growth in certain configurations
+        # scaler.unscale_(optimizer)
+        # torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
+
         scaler.step(optimizer)
         scaler.update() 
         optimizer.zero_grad()
@@ -102,7 +108,7 @@ def train(net, config, trainloader, optimizer, attn_mask, heavy_budget, recent_b
     return train_loss
 
   
-def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, baseline_hh, baseline_recent, lambda_constant, attention_score_decay):
+def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix_heavy_to_initial_tokens, o_proj, multi_query, baseline_hh, baseline_recent, lambda_constant, attention_score_decay=1.0, half_precision=False):
 
     val_loss = 0.0
     baseline_val_loss = 0.0
@@ -121,7 +127,7 @@ def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix
                 baseline_sparse_out, _, _ = A_attn_out(config, q, k, v, target_attn_weights, baseline_hh, baseline_recent, multi_query)
             else:
                 sparse_attn_weights, sparse_norms_lse, sparse_mask = h2o_attn_weights(target_attn_weights, heavy_budget, recent_budget, multi_query, attention_score_decay)
-                baseline_sparse_out, _, _ = h2o_attn_out(config, q, k, v, target_attn_weights, baseline_hh, baseline_recent, multi_query)
+                baseline_sparse_out, _, _ = h2o_attn_out(config, q, k, v, target_attn_weights, baseline_hh, baseline_recent, multi_query, attention_score_decay)
 
             lr_mask = attn_mask * (~sparse_mask)
             
@@ -140,123 +146,6 @@ def validate(net, config, valloader, attn_mask, heavy_budget, recent_budget, fix
     val_loss /= len(valloader) 
     baseline_val_loss /= len(valloader) 
     return val_loss, baseline_val_loss
-
-
-
-class KernelizedHeadAttention(nn.Module):
-    def __init__(self, dim_head, dim_hid, dim_ker, num_heads, dropout, multi_query=False, lambda_gating=None):
-        super().__init__()
-        self.dim_ker = dim_ker
-        self.num_heads = num_heads
-        self.dim_head = dim_head
-        print(f"Number of heads: {self.num_heads}")
-        
-        # MLP Layer 1
-        a = math.sqrt(6/(dim_head + dim_hid))
-        self.kernel_q_mat1 = torch.nn.init.uniform_(torch.empty(num_heads, dim_head, dim_hid), a=-a, b=a)
-        self.kernel_q_mat1 = nn.Parameter(self.kernel_q_mat1, requires_grad=True)
-        if not multi_query:
-            self.kernel_k_mat1 = torch.nn.init.uniform_(torch.empty(num_heads, dim_head, dim_hid), a=-a, b=a)
-            self.kernel_k_mat1 = nn.Parameter(self.kernel_k_mat1, requires_grad=True)
-        else:
-            self.kernel_k_mat1 = nn.Linear(dim_head, dim_hid, bias=False)
-        
-        # MLP Layer 2
-        a = math.sqrt(6/(dim_ker + dim_hid))
-        self.kernel_q_mat2 = torch.nn.init.uniform_(torch.empty(num_heads, dim_hid, dim_ker), a=-a, b=a)
-        self.kernel_q_mat2 = nn.Parameter(self.kernel_q_mat2, requires_grad=True)
-        if not multi_query:
-            self.kernel_k_mat2 = torch.nn.init.uniform_(torch.empty(num_heads, dim_hid, dim_ker), a=-a, b=a)
-            self.kernel_k_mat2 = nn.Parameter(self.kernel_k_mat2, requires_grad=True)
-        else:
-            self.kernel_k_mat2 = nn.Linear(dim_hid, dim_ker, bias=False)
-
-        
-
-        # MLP Layer 3 (keys only)
-        a = math.sqrt(6/(2 * dim_ker))
-        if not multi_query:
-            self.interaction_k = torch.nn.init.uniform_(torch.empty(num_heads, dim_ker, dim_ker), a=-a, b=a)
-            self.interaction_k = nn.Parameter(self.interaction_k, requires_grad=True)
-        else:
-            self.interaction_k = nn.Linear(dim_ker, dim_ker, bias=False)
-        
-        
-        if multi_query:
-            num_heads = 1
-        self.scalingD = nn.Parameter(torch.ones(1, num_heads, 1, dim_ker) * 1e-4, requires_grad=True)
-        self.scalingD2 = nn.Parameter(torch.ones(1, num_heads, 1, dim_ker) * 1e-4, requires_grad=True)
-
-        # initialize at 5.0 for all learned lambdas that are still time-independent
-        # initialization at 5.0 results in decay post-sigmoid of around 0.99 without being too deep
-        # into extremely low gradient territory, seems neutral enough
-        if lambda_gating == "learned-constant":
-            self.W_lambda = nn.Parameter(5.0 * torch.ones(1), requires_grad=True)
-        elif lambda_gating == "learned-constant-head":
-            assert not multi_query, "Multi-query attention (MQA) not supported by per-head lambdas, defeats the purpose of MQA."
-            self.W_lambda = nn.Parameter(5.0 * torch.ones(num_heads), requires_grad=True)
-        elif lambda_gating == "time-dependent":
-            # based on Mamba-2 formulation of G_t
-            # init alpha to large negative value for slow start
-            self.alpha = nn.Parameter(-10.0 * torch.ones(1), requires_grad=True)
-            self.W_lambda = nn.Linear(self.num_heads * self.dim_head, 1, bias=False)
-        elif lambda_gating == "time-data-dependent":
-            raise NotImplementedError("Time-data-dependent lambda gating not yet implemented.")
-
-        self.multi_query = multi_query
-        self.act = F.gelu
-        self.kernel_f = F.gelu
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x_t, q, k, v, lr_attn_mask, sparse_norms_lse, sparse_attn_weights, lambda_constant):
-        B, S, D = q.shape
-            
-        # addition of lambda gating-based decay for sparse mask
-        decay_mask = None
-        if lambda_gating == "constant":
-            decay_mask = get_lambda_mask_sparse(lr_attn_mask, lambda_constant)
-        elif lambda_gating == "learned-constant" or lambda_gating == "learned-constant-head":
-            decay_mask = get_lambda_mask_sparse(lr_attn_mask, F.sigmoid(self.W_lambda))
-        elif lambda_gating == "time-dependent":
-            # here, self.W_lambda is a nn.Linear instead of being parameters we apply sigmoid to
-            lambda_t = torch.exp(-1.0 * F.softplus(self.W_lambda(x_t)) * torch.exp(self.alpha))
-            decay_mask = get_lambda_mask_sparse(lr_attn_mask, lambda_t)
-        elif lambda_gating == "time-data-dependent":
-            raise NotImplementedError("Time-data-dependent lambda gating not yet implemented.")
-
-        q = q.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
-        if not multi_query:
-            k = k.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
-            v = v.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
-        else:
-            k = k.unsqueeze(1)
-            v = v.unsqueeze(1)
-        
-        q = self.act(self.dropout(torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat1)))
-        q = self.kernel_f(torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat2))
-        
-        if not self.multi_query:
-            k = self.act(self.dropout(torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat1)))
-            k = torch.abs(self.scalingD) * self.kernel_f(torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat2))
-            k = k + torch.einsum('bhsd,hde->bhse', k, self.interaction_k) * self.scalingD2
-        else:
-            k = self.act(self.dropout(self.kernel_k_mat1(k)))
-            k = torch.abs(self.scalingD) * self.kernel_f(self.kernel_k_mat2(k))
-            k = k + self.interaction_k(k) * self.scalingD2
-        
-        out = torch.matmul(q.abs(), k.abs().transpose(2, 3)) # B, H, S, S
-        
-        if decay_mask is not None:
-            out = decay_mask * out
-        else:
-            out = lr_attn_mask * out
-
-        lr_norms_lse = torch.log(out.sum(dim=-1, keepdim=True) + 1e-6)
-        norm_factor_lse = torch.logaddexp(lr_norms_lse, sparse_norms_lse)
-        out = (torch.log(out + 1e-6) * lr_attn_mask) + ((~lr_attn_mask) * sparse_attn_weights)
-        out = torch.exp(out - norm_factor_lse)
-        out = torch.matmul(out, v).transpose(1, 2).flatten(2)
-        return out
 
 
 if __name__ == '__main__':
@@ -365,6 +254,7 @@ if __name__ == '__main__':
     head_dim = config.hidden_size // config.num_attention_heads
     if seq_len == -1:
         seq_len = config.max_position_embeddings
+    print(f"Sanity check for transformer version update: seq_len is set to {seq_len}")
 
     # debugging is faster with wt
     if not debug:
@@ -464,6 +354,7 @@ if __name__ == '__main__':
                 multi_query,
                 lambda_constant,
                 attention_score_decay,
+                half_precision=args.half_precision,
             )
             val_loss, baseline_loss = validate(
                 net, 
@@ -479,6 +370,7 @@ if __name__ == '__main__':
                 baseline_recent,
                 lambda_constant,
                 attention_score_decay,
+                half_precision=args.half_precision,
             )
             
             train_mses[epoch] = train_loss

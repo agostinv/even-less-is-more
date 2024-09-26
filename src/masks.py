@@ -29,8 +29,8 @@ def local_heavy_hitter_mask_nonoverlap(attn_weights, heavy_budget, recent_budget
     attention_decay_mask = attention_decay_mask / attention_score_decay
 
     accumulated_attention_score = torch.cumsum(tmp_attn, dim=-2) #(head, keys)
-    accumulated_attention_score[:,:,:,heavy_budget+recent_budget+padding_length:] = 0
-    accumulated_attention_score[:,:,:,:padding_length] = 0
+    accumulated_attention_score[:, :, :, heavy_budget+recent_budget+padding_length:] = 0
+    accumulated_attention_score[:, :, :, :padding_length] = 0
 
     # decay accumulated scores so far
     accumulated_attention_score = accumulated_attention_score * attention_decay_mask
@@ -169,21 +169,12 @@ def get_lambda_t_mask_nosparse(attn_weights, lambda_t_val: torch.Tensor):
 # expects sparse_mask of dimensions B x H x N x N
 # originally, lambda_val was just a float but we should now expect potential tensors of size H
 def get_lambda_mask_sparse(sparse_mask, lambda_val):
-    len = sparse_mask.size(-2)
-    shifted_down_sparse_mask = torch.zeros_like(sparse_mask)
-    shifted_down_sparse_mask[:, :, 1:, :] = sparse_mask[:, :, :-1, :]
-
-    # note: non-zeros are all True, only zeros are False as baseline before xor
-    #       need to add back identity matrix to account for missing diagonal
-    xor_sparse_mask = torch.logical_xor(
-                        sparse_mask.to(torch.int),
-                        shifted_down_sparse_mask.to(torch.int), 
-    ).to(torch.int)
+    xor_sparse_mask = get_eviction_triggered(sparse_mask)
 
     # NOTE: final bool() and int() casts cover block-wise cases for evictions,
     #       this ensures likely compatibility with methods like paged attention
     evict_triggered = torch.sum(xor_sparse_mask, dim=-1).unsqueeze(-1).bool().int()
-
+    
     # check for case where lambda_val is dependent on a dimension
     if torch.is_tensor(lambda_val) and (sum(lambda_val.size()) / lambda_val.dim()) > 1:
         # then check for attention head dependent or time dependent
@@ -216,3 +207,41 @@ def get_lambda_mask_sparse(sparse_mask, lambda_val):
             return lambda_mask / lambda_evict_div
     else:
         return lambda_mask / lambda_val
+
+
+# sole purpose is to provide indices of keys/values as they are evicted across
+# time so that they can be reordered during time-data-dependent forward passes
+def get_eviction_kv_indices(sparse_mask):
+    B, H, _, _ = sparse_mask.shape
+    evict_triggered = get_eviction_triggered(sparse_mask)
+
+
+    # produces a series of two-element tensors acting as indices, then we split to
+    # just get key indices for evictions in order across time
+    evict_indices = torch.nonzero(evict_triggered, as_tuple=False)
+    
+    # last column post-split should contain reordered key indices, squeeze to
+    # remove extra dimension post-split 
+    evict_indices = evict_indices.split(1, dim=-1)[-1].squeeze()
+
+    assert evict_indices.size(0) % B == 0, \
+            "Even division of triggered token length by batch size required. " + \
+            "Eviction decisions are not allowed to be dependent on batch, "    + \
+            "i.e. the same number of tokens must be evicted per-batch."
+    evict_indices = evict_indices.view(B, evict_indices.size(0) // B)
+
+    return evict_indices # B x (H * S_evicted)
+
+# provides the eviction events as what amounts to a binary mask
+def get_eviction_triggered(sparse_mask):
+    shifted_down_sparse_mask = torch.zeros_like(sparse_mask)
+    shifted_down_sparse_mask[:, :, 1:, :] = sparse_mask[:, :, :-1, :]
+
+    # note: non-zeros are all True, only zeros are False as baseline before xor
+    #       need to add back identity matrix to account for missing diagonal
+    evict_triggered_xor = torch.logical_xor(
+                        sparse_mask.to(torch.int),
+                        shifted_down_sparse_mask.to(torch.int), 
+    ).to(torch.int)
+    
+    return evict_triggered_xor
