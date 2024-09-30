@@ -34,8 +34,8 @@ class KernelizedHeadAttention(nn.Module):
         print(f"Head dimension: {self.dim_head}")
         print(f"Kernel dimension: {self.dim_ker}")
         print(f"Kernel function: {self.kernel_fn}")
-        
-        if self.kernel_fn is "LESS":
+       
+        if self.kernel_fn == "LESS":
             # MLP Layer 1
             a = math.sqrt(6/(dim_head + dim_hid))
             self.kernel_q_mat1 = torch.nn.init.uniform_(torch.empty(num_heads, dim_head, dim_hid), a=-a, b=a)
@@ -74,7 +74,7 @@ class KernelizedHeadAttention(nn.Module):
             self.act = F.gelu
             self.kernel_f = F.gelu
         
-        elif self.kernel_fn is "Hedgehog":
+        elif self.kernel_fn == "Hedgehog":
             a = math.sqrt(6/(dim_head + dim_hid))
             self.kernel_q_mat1 = torch.nn.init.uniform_(torch.empty(num_heads, dim_head, dim_hid), a=-a, b=a)
             self.kernel_q_mat1 = nn.Parameter(self.kernel_q_mat1, requires_grad=True)
@@ -94,10 +94,10 @@ class KernelizedHeadAttention(nn.Module):
             else:
                 self.kernel_k_mat2 = nn.Linear(dim_hid, dim_ker // 2, bias=False)
             
-            self.act = torch.exp
-            self.kernel_f = torch.exp
+            self.act = F.gelu
+            self.kernel_f = F.softmax
 
-        elif self.kernel_fn is "Dijiang":
+        elif self.kernel_fn == "Dijiang":
             raise NotImplementedError
 
         else:
@@ -162,6 +162,10 @@ class KernelizedHeadAttention(nn.Module):
             lambda_t_data = F.logsigmoid(self.W_lambda(x_t)) / 16
 
         q, k = self.apply_kernel_fn(q, k)
+        if not self.multi_query:
+            v = v.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
+        else:
+            v = v.unsqueeze(1)
 
         # ALTERNATE forward path to accomodate unique needs for FLA kernels and
         # non-QK^T manifestation for time-data-dependent lambda gating use
@@ -316,16 +320,18 @@ class KernelizedHeadAttention(nn.Module):
             norm, _ = chunk_gla(q, k, summation_value, lambda_t_data, initial_state=None)
 
         return output, norm, S_offset
-       
+      
+
     def apply_kernel_fn(self, q, k):
-        if self.kernel_fn is "LESS":
+        B, S, D = q.shape
+        H = self.num_heads
+        
+        if self.kernel_fn == "LESS":
             q = q.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
             if not self.multi_query:
                 k = k.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
-                v = v.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
             else:
                 k = k.unsqueeze(1)
-                v = v.unsqueeze(1)
             
             q = self.act(self.dropout(torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat1)))
             q = self.kernel_f(torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat2))
@@ -339,29 +345,26 @@ class KernelizedHeadAttention(nn.Module):
                 k = torch.abs(self.scalingD) * self.kernel_f(self.kernel_k_mat2(k))
                 k = k + self.interaction_k(k) * self.scalingD2
 
-        elif kernel_fn is "Hedgehog":
+        elif self.kernel_fn == "Hedgehog":
             q = q.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
             if not self.multi_query:
                 k = k.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
-                v = v.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
             else:
                 k = k.unsqueeze(1)
-                v = v.unsqueeze(1)
-            
             
             q = self.act(self.dropout(torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat1)))
             q = torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat2)
-            q = self.kernel_f(torch.cat((q, -q), dim=-1))
+            q = self.kernel_f(torch.cat((q, -q), dim=-1), dim=-1)
 
             if not self.multi_query:
                 k = self.act(self.dropout(torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat1)))
                 k = torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat2)
             else:
                 k = self.act(self.dropout(self.kernel_k_mat1(k)))
-                k = self.kernel_f(self.kernel_k_mat2(k))
-            k = self.kernel_f(torch.cat((k, -k), dim=-1))
+                k = self.kernel_k_mat2(k)
+            k = self.kernel_f(torch.cat((k, -k), dim=-1), dim=-1)
             
-        elif kernel_fn is "Dijiang":
+        elif kernel_fn == "Dijiang":
             raise NotImplementedError
         
         else:
