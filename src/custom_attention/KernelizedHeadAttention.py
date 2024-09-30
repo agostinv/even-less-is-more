@@ -86,13 +86,13 @@ class KernelizedHeadAttention(nn.Module):
             
             # step down
             a = math.sqrt(6/(dim_ker + dim_hid))
-            self.kernel_q_mat2 = torch.nn.init.uniform_(torch.empty(num_heads, dim_hid, dim_ker), a=-a, b=a)
+            self.kernel_q_mat2 = torch.nn.init.uniform_(torch.empty(num_heads, dim_hid, dim_ker // 2), a=-a, b=a)
             self.kernel_q_mat2 = nn.Parameter(self.kernel_q_mat2, requires_grad=True)
             if not self.multi_query:
-                self.kernel_k_mat2 = torch.nn.init.uniform_(torch.empty(num_heads, dim_hid, dim_ker), a=-a, b=a)
+                self.kernel_k_mat2 = torch.nn.init.uniform_(torch.empty(num_heads, dim_hid, dim_ker // 2), a=-a, b=a)
                 self.kernel_k_mat2 = nn.Parameter(self.kernel_k_mat2, requires_grad=True)
             else:
-                self.kernel_k_mat2 = nn.Linear(dim_hid, dim_ker, bias=False)
+                self.kernel_k_mat2 = nn.Linear(dim_hid, dim_ker // 2, bias=False)
             
             self.act = torch.exp
             self.kernel_f = torch.exp
@@ -348,19 +348,23 @@ class KernelizedHeadAttention(nn.Module):
                 k = k.unsqueeze(1)
                 v = v.unsqueeze(1)
             
-            q = self.act(self.dropout(torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat1)))
-            q = self.kernel_f(torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat2))
             
+            q = self.act(self.dropout(torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat1)))
+            q = torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat2)
+            q = self.kernel_f(torch.cat((q, -q), dim=-1))
+
             if not self.multi_query:
                 k = self.act(self.dropout(torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat1)))
-                k = self.kernel_f(torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat2))
+                k = torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat2)
             else:
                 k = self.act(self.dropout(self.kernel_k_mat1(k)))
                 k = self.kernel_f(self.kernel_k_mat2(k))
-
+            k = self.kernel_f(torch.cat((k, -k), dim=-1))
+            
         elif kernel_fn is "Dijiang":
             raise NotImplementedError
         
         else:
             raise NotImplementedError
+        
         return q, k
