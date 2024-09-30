@@ -193,6 +193,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--attention-score-decay', type=float, default=1.0) # enables attention accumulation decay
 
+    parser.add_argument('--kernel-fn', type=str, choices=["LESS", "Hedgehog", "Dijiang"], default="LESS")
 
     args = parser.parse_args()
 
@@ -228,6 +229,8 @@ if __name__ == '__main__':
 
     attention_score_decay = args.attention_score_decay
     random_seed_offset = args.random_seed_offset
+
+    kernel_fn = args.kernel_fn
 
     assert heavy_ratio >= 0 and heavy_ratio <= 1 and recent_ratio >= 0 and recent_ratio <= 1
 
@@ -328,7 +331,16 @@ if __name__ == '__main__':
         trainloader_net = torch.utils.data.DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=1)
         valloader_net = torch.utils.data.DataLoader(val_data, batch_size=batch_size, shuffle=False, num_workers=1)
 
-        net = KernelizedHeadAttention(head_dim, ker_hid, ker_dim, num_heads, dropout, multi_query, lambda_gating)
+        net = KernelizedHeadAttention(
+                head_dim, 
+                ker_hid, 
+                ker_dim, 
+                num_heads, 
+                dropout, 
+                multi_query, 
+                lambda_gating,
+                kernel_fn
+        )
         net.to(device).float()
 
         o_proj = o_proj_dict[model_name](l).float().to(device)
