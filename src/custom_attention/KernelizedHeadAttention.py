@@ -74,7 +74,7 @@ class KernelizedHeadAttention(nn.Module):
             self.act = F.gelu
             self.kernel_f = F.gelu
         
-        else if self.kernel_fn is "Hedgehog":
+        elif self.kernel_fn is "Hedgehog":
             a = math.sqrt(6/(dim_head + dim_hid))
             self.kernel_q_mat1 = torch.nn.init.uniform_(torch.empty(num_heads, dim_head, dim_hid), a=-a, b=a)
             self.kernel_q_mat1 = nn.Parameter(self.kernel_q_mat1, requires_grad=True)
@@ -97,7 +97,7 @@ class KernelizedHeadAttention(nn.Module):
             self.act = torch.exp
             self.kernel_f = torch.exp
 
-        else if self.kernel_fn is "Dijiang":
+        elif self.kernel_fn is "Dijiang":
             raise NotImplementedError
 
         else:
@@ -317,7 +317,7 @@ class KernelizedHeadAttention(nn.Module):
 
         return output, norm, S_offset
        
-    def apply_kernel_fn(self. q, k):
+    def apply_kernel_fn(self, q, k):
         if self.kernel_fn is "LESS":
             q = q.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
             if not self.multi_query:
