@@ -303,13 +303,14 @@ if __name__ == '__main__':
 
         model.toggle_layer(li)
 
+        # slightly inefficient to open file over and over again, but it's relatively small so shouldn't be a big deal
         if args.budget_config is not None:
             print(f"WARNING: Budget config file {args.budget_config} is being used. Any otherwise specified budget values will be ignored.")
             with open(args.budget_config, 'r') as file:
                 budget_data = yaml.load(file, Loader=yaml.FullLoader)
 
                 assert model_name.lower() in budget_data['model'], f"Model {model_name} doesn't match contents of config."
-                assert model_size.lower() in budget_data['model'], f"Model size set to {model_size} doesn't match contents of config."
+                assert model_size_name.lower() in budget_data['model'], f"Model size set to {model_size_name} doesn't match contents of config."
                 assert f'layer_{li}' in budget_data['layers'].keys(), f"Didn't find layer {li} in budget config when it was expected. " \
                     + "Double check config and expected number of layers for model."
 
@@ -317,6 +318,10 @@ if __name__ == '__main__':
                 heavy_budget = int(budget_data['layers'][f'layer_{li}']['heavy_budget'])
                 recent_budget = int(budget_data['layers'][f'layer_{li}']['recent_budget'])
                 print(f"Using fixed budget of fixed budget of {fixed_budget}, heavy budget of {heavy_budget}, and recent budget of {recent_budget} for layer {li}")
+                
+                fixed_budget = fixed_budget * config.max_position_embeddings 
+                heavy_budget = heavy_budget * config.max_position_embeddings
+                recent_budget = recent_budget * config.max_position_embeddings
         
         train_mses = torch.zeros(epochs)
         val_mses = torch.zeros_like(train_mses)

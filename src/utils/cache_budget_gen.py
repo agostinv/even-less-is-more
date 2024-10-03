@@ -17,7 +17,7 @@ def add_args(parser):
     parser.add_argument('--force-minimum', action='store_true', 
                         help='Force minimum budget to be same, solves an issue with power-law distributions but inflates the average.')
 
-def get_budget_split(average_budget, budget_split_type, budget_minimum, force_minimum, num_layers, l_idx):
+def get_budget_split(average_budget, budget_split_type, budget_minimum, force_minimum, num_layers, li):
     if budget_split_type == 'uniform':
         return {
             'fixed_budget': average_budget * 0.05,
@@ -26,7 +26,7 @@ def get_budget_split(average_budget, budget_split_type, budget_minimum, force_mi
         }, average_budget
     
     elif budget_split_type == 'linear':
-        mod_budget = budget_minimum + 2 * (average_budget - budget_minimum) * (1 - (l_idx / (num_layers - 1)))
+        mod_budget = budget_minimum + 2 * (average_budget - budget_minimum) * (1 - (li / (num_layers - 1)))
         return {
             'fixed_budget': mod_budget * 0.05,
             'heavy_budget': mod_budget * 0.475,
@@ -45,7 +45,7 @@ def get_budget_split(average_budget, budget_split_type, budget_minimum, force_mi
         unscaled_total = sum([(average_budget - budget_minimum) * ((i + 1) ** -0.7) / normalization_factor for i in range(num_layers)])
         scaling_factor = (average_budget * num_layers) / unscaled_total
 
-        mod_budget = max(minimum, scaling_factor * (average_budget - budget_minimum) * ((l_idx + 1) ** -0.7) / normalization_factor)
+        mod_budget = max(minimum, scaling_factor * (average_budget - budget_minimum) * ((li + 1) ** -0.7) / normalization_factor)
         return {
             'fixed_budget': mod_budget * 0.05,
             'heavy_budget': mod_budget * 0.475,
