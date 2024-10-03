@@ -1,0 +1,130 @@
+layers:
+  layer_0:
+    fixed_budget: 0.004780589588512506
+    heavy_budget: 0.045415601090868805
+    recent_budget: 0.045415601090868805
+  layer_1:
+    fixed_budget: 0.002942798082196022
+    heavy_budget: 0.027956581780862206
+    recent_budget: 0.027956581780862206
+  layer_10:
+    fixed_budget: 0.0008922911420848524
+    heavy_budget: 0.008476765849806096
+    recent_budget: 0.008476765849806096
+  layer_11:
+    fixed_budget: 0.0008395655099053059
+    heavy_budget: 0.007975872344100406
+    recent_budget: 0.007975872344100406
+  layer_12:
+    fixed_budget: 0.0007938183149111002
+    heavy_budget: 0.007541273991655451
+    recent_budget: 0.007541273991655451
+  layer_13:
+    fixed_budget: 0.0007536884090695813
+    heavy_budget: 0.007160039886161022
+    recent_budget: 0.007160039886161022
+  layer_14:
+    fixed_budget: 0.0007181539937199981
+    heavy_budget: 0.006822462940339981
+    recent_budget: 0.006822462940339981
+  layer_15:
+    fixed_budget: 0.0006864319245300336
+    heavy_budget: 0.0065211032830353195
+    recent_budget: 0.0065211032830353195
+  layer_16:
+    fixed_budget: 0.0006579111040147322
+    heavy_budget: 0.006250155488139955
+    recent_budget: 0.006250155488139955
+  layer_17:
+    fixed_budget: 0.0006321071571512196
+    heavy_budget: 0.006005017992936585
+    recent_budget: 0.006005017992936585
+  layer_18:
+    fixed_budget: 0.0006086308202094175
+    heavy_budget: 0.005781992791989466
+    recent_budget: 0.005781992791989466
+  layer_19:
+    fixed_budget: 0.0005871654113968416
+    heavy_budget: 0.005578071408269994
+    recent_budget: 0.005578071408269994
+  layer_2:
+    fixed_budget: 0.0022156266638642596
+    heavy_budget: 0.021048453306710464
+    recent_budget: 0.021048453306710464
+  layer_20:
+    fixed_budget: 0.0005674504633813897
+    heavy_budget: 0.005390779402123202
+    recent_budget: 0.005390779402123202
+  layer_21:
+    fixed_budget: 0.0005492696273274605
+    heavy_budget: 0.005218061459610875
+    recent_budget: 0.005218061459610875
+  layer_22:
+    fixed_budget: 0.0005324415954199918
+    heavy_budget: 0.005058195156489921
+    recent_budget: 0.005058195156489921
+  layer_23:
+    fixed_budget: 0.0005168131935784965
+    heavy_budget: 0.004909725338995717
+    recent_budget: 0.004909725338995717
+  layer_24:
+    fixed_budget: 0.0005022540590268505
+    heavy_budget: 0.004771413560755079
+    recent_budget: 0.004771413560755079
+  layer_25:
+    fixed_budget: 0.0005
+    heavy_budget: 0.00475
+    recent_budget: 0.00475
+  layer_26:
+    fixed_budget: 0.0005
+    heavy_budget: 0.00475
+    recent_budget: 0.00475
+  layer_27:
+    fixed_budget: 0.0005
+    heavy_budget: 0.00475
+    recent_budget: 0.00475
+  layer_28:
+    fixed_budget: 0.0005
+    heavy_budget: 0.00475
+    recent_budget: 0.00475
+  layer_29:
+    fixed_budget: 0.0005
+    heavy_budget: 0.00475
+    recent_budget: 0.00475
+  layer_3:
+    fixed_budget: 0.0018115047092488836
+    heavy_budget: 0.01720929473786439
+    recent_budget: 0.01720929473786439
+  layer_30:
+    fixed_budget: 0.0005
+    heavy_budget: 0.00475
+    recent_budget: 0.00475
+  layer_31:
+    fixed_budget: 0.0005
+    heavy_budget: 0.00475
+    recent_budget: 0.00475
+  layer_4:
+    fixed_budget: 0.0015495388105407064
+    heavy_budget: 0.01472061870013671
+    recent_budget: 0.01472061870013671
+  layer_5:
+    fixed_budget: 0.001363878194637259
+    heavy_budget: 0.012956842849053959
+    recent_budget: 0.012956842849053959
+  layer_6:
+    fixed_budget: 0.0012243704327453723
+    heavy_budget: 0.011631519111081037
+    recent_budget: 0.011631519111081037
+  layer_7:
+    fixed_budget: 0.001115111951269885
+    heavy_budget: 0.010593563537063906
+    recent_budget: 0.010593563537063906
+  layer_8:
+    fixed_budget: 0.0010268611063000113
+    heavy_budget: 0.009755180509850107
+    recent_budget: 0.009755180509850107
+  layer_9:
+    fixed_budget: 0.0009538530249291587
+    heavy_budget: 0.009061603736827007
+    recent_budget: 0.009061603736827007
+model: llama2_7b

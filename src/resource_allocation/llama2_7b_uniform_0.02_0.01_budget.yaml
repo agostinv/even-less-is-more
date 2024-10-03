@@ -1,0 +1,130 @@
+layers:
+  layer_0:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_1:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_10:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_11:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_12:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_13:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_14:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_15:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_16:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_17:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_18:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_19:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_2:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_20:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_21:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_22:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_23:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_24:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_25:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_26:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_27:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_28:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_29:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_3:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_30:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_31:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_4:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_5:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_6:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_7:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_8:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+  layer_9:
+    fixed_budget: 0.001
+    heavy_budget: 0.0095
+    recent_budget: 0.0095
+model: llama2_7b
