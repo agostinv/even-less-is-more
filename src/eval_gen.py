@@ -88,6 +88,7 @@ def main():
     parser.add_argument('--enable_small_cache', action='store_true')
     parser.add_argument("--heavy_ratio", type=float, default=0.1)
     parser.add_argument("--recent_ratio", type=float, default=0.1)
+    parser.add_argument("--budget-config", type=str, default=None) # for budget config file, overrides other options
     parser.add_argument('--fix_heavy_to_initial_tokens', action='store_true')
     
     # Kernels
@@ -141,6 +142,22 @@ def main():
         config.fix_heavy_to_initial_tokens = args.fix_heavy_to_initial_tokens
         config.heavy_count = int(args.heavy_ratio * config.max_position_embeddings)
         config.recent_count = int(args.recent_ratio * config.max_position_embeddings)
+
+        if args.budget_config is not None:
+            budget_data = yaml.load(file, Loader=yaml.FullLoader)
+
+            assert args.model_arch.lower() in budget_data['model'], f"Model {args.model_arch} doesn't match contents of config."
+            assert model_size_name.lower() in budget_data['model'], f"Model size set to {model_size_name} doesn't match contents of config."
+            
+            for li in range(config.num_hidden_layers):
+                assert f'layer_{li}' in budget_data['layers'].keys(), f"Didn't find layer {li} in budget config when it was expected. " \
+                    + "Double check config and expected number of layers for model."
+
+                fixed_budget = int(budget_data['layers'][f'layer_{li}']['fixed_budget'])* config.max_position_embeddings 
+                heavy_budget = int(budget_data['layers'][f'layer_{li}']['heavy_budget'])* config.max_position_embeddings
+                recent_budget = int(budget_data['layers'][f'layer_{li}']['recent_budget']) * config.max_position_embeddings
+
+
         config.kernel_hidden_size = args.ker_dim
         config.ker_hid = args.ker_hid
         
@@ -198,6 +215,11 @@ def main():
                 print('skipped', skipped)
 
             else:
+                seq_len = len(input_ids[0])
+                attention_mask = torch.tril(torch.ones(seq_len, seq_len), diagonal=0).to(model.device)
+
+                # turn off automatic cache behavior for transformers if we enable a small cache
+                # needed to support version bump from transformers v4.35.2 to v4.44.2
                 output_sequences = model.generate(
                     input_ids=input_ids,
                     max_length=max_tokens + len(input_ids[0]),
@@ -206,7 +228,10 @@ def main():
                     top_p=1,
                     do_sample=True,
                     num_return_sequences=1,
-                    return_dict_in_generate=True, output_scores=True,
+                    return_dict_in_generate=True,
+                    output_scores=True,
+                    use_cache=(not args.enable_small_cache),
+                    attention_mask=attention_mask,
                 )
 
                 for name, m in model.named_modules():
