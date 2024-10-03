@@ -113,6 +113,7 @@ class KernelizedHeadAttention(nn.Module):
             
             self.act = F.tanh
             self.kernel_f = torch.exp
+            
 
         elif self.kernel_fn == "Dijiang":
             raise NotImplementedError
