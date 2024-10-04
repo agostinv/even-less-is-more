@@ -18,7 +18,7 @@ Truly data-dependent G (e.g. some d x d matrix for elementwise application to K^
 
 The LESS implementation calls for a small MLP network that functions as a "feature map" of sorts in classical linear attention. This is NOT NORMAL, even if it might work fine in practice. They tried using Performer-based maps, but other options have been recently proposed (see Dijiang, an ICML '24 oral on efficient LLMs that uses a DCT-based map). LESS adds parameters to the model to produce its feature maps, a counter-intuitive augmentation given the goal of memory footprint reduction.
 
-The goal is an almost in-place drop-in for softmax, so the feature map shouldn't be arbitrary. There needs to be at least some mathematical basis for softmax approximation from our perspective. Given that, Dijiang is an obviou option. The Taylor series approximation of BASED is another option. 
+The goal is an almost in-place drop-in for softmax, so the feature map shouldn't be arbitrary. There needs to be at least some mathematical basis for softmax approximation from our perspective. Given that, Dijiang is an obvious option. The Taylor series approximation of BASED is another option. 
 
 #### Linear Attention Re-Weighting
 
