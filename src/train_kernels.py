@@ -1,25 +1,22 @@
 import os
-import sys
 import argparse
 import numpy as np
 import random
 import gc
+import yaml
+from tqdm import tqdm
+
 from data_processing import get_c4, get_wikitext2
 from annotated_models.llama import get_annotated_llama
 from annotated_models.falcon import get_annotated_falcon
-from masks import get_A_mask, get_h2o_mask, get_lambda_mask_sparse
+from custom_attention import KernelizedHeadAttention
+
 from transformers import set_seed, AutoTokenizer, AutoModelForCausalLM
+
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torch import optim
-from torch.utils.data import Dataset
 from utils.train_utils import *
 
-import math
-from tqdm import tqdm
-
-from custom_attention import KernelizedHeadAttention
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -170,6 +167,7 @@ if __name__ == '__main__':
     # Sparse Cache 
     parser.add_argument("--heavy_ratio", type=float, default=0.1)
     parser.add_argument("--recent_ratio", type=float, default=0.1)
+    parser.add_argument("--budget-config", type=str, default=None) # for budget config file, overrides other options
     parser.add_argument("--fix_heavy_to_initial_tokens", action='store_true') # for Lambda masking
 
     # Kernels
@@ -304,7 +302,26 @@ if __name__ == '__main__':
         reset_seed(random_seed_offset)
 
         model.toggle_layer(li)
-        
+
+        # slightly inefficient to open file over and over again, but it's relatively small so shouldn't be a big deal
+        if args.budget_config is not None:
+            print(f"WARNING: Budget config file {args.budget_config} is being used. Any otherwise specified budget values will be ignored.")
+            with open(args.budget_config, 'r') as file:
+                budget_data = yaml.load(file, Loader=yaml.FullLoader)
+
+                assert model_name.lower() in budget_data['model'], f"Model {model_name} doesn't match contents of config."
+                assert model_size_name.lower() in budget_data['model'], f"Model size set to {model_size_name} doesn't match contents of config."
+                assert f'layer_{li}' in budget_data['layers'].keys(), f"Didn't find layer {li} in budget config when it was expected. " \
+                    + "Double check config and expected number of layers for model."
+
+                fixed_budget = int(budget_data['layers'][f'layer_{li}']['fixed_budget'])
+                heavy_budget = int(budget_data['layers'][f'layer_{li}']['heavy_budget'])
+                recent_budget = int(budget_data['layers'][f'layer_{li}']['recent_budget'])
+                print(f"Using fixed budget of fixed budget of {fixed_budget}, heavy budget of {heavy_budget}, and recent budget of {recent_budget} for layer {li}")
+                
+                fixed_budget = fixed_budget * config.max_position_embeddings 
+                heavy_budget = heavy_budget * config.max_position_embeddings
+                recent_budget = recent_budget * config.max_position_embeddings
         
         train_mses = torch.zeros(epochs)
         val_mses = torch.zeros_like(train_mses)

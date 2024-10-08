@@ -88,6 +88,7 @@ def main():
     parser.add_argument('--enable_small_cache', action='store_true')
     parser.add_argument("--heavy_ratio", type=float, default=0.1)
     parser.add_argument("--recent_ratio", type=float, default=0.1)
+    parser.add_argument("--budget-config", type=str, default=None) # for budget config file, overrides other options
     parser.add_argument('--fix_heavy_to_initial_tokens', action='store_true')
     
     # Kernels
@@ -141,6 +142,7 @@ def main():
         config.fix_heavy_to_initial_tokens = args.fix_heavy_to_initial_tokens
         config.heavy_count = int(args.heavy_ratio * config.max_position_embeddings)
         config.recent_count = int(args.recent_ratio * config.max_position_embeddings)
+
         config.kernel_hidden_size = args.ker_dim
         config.ker_hid = args.ker_hid
         
@@ -151,6 +153,24 @@ def main():
         else:
             path_func = lambda li: f'../checkpoints/{saved_model_name}/layer_{li}.pth'
             model = ENABLE_FUNCTIONS[args.model_arch](model, config, path_func)
+
+        if args.budget_config is not None:
+            budget_data = yaml.load(file, Loader=yaml.FullLoader)
+
+            assert args.model_arch.lower() in budget_data['model'], f"Model {args.model_arch} doesn't match contents of config."
+            assert model_size_name.lower() in budget_data['model'], f"Model size set to {model_size_name} doesn't match contents of config."
+
+            for name, module in reversed(model._modules.items()):
+                if isinstance(module, TARGET_MODULE[args.model_arch]):
+                    li = module.layer_idx
+                    assert f'layer_{li}' in budget_data['layers'].keys(), f"Didn't find layer {li} in budget config when it was expected. " \
+                        + "Double check config and expected number of layers for model."
+
+                    module.fixed_budget = int(budget_data['layers'][f'layer_{li}']['fixed_budget']) * config.max_position_embeddings 
+                    module.heavy_budget = int(budget_data['layers'][f'layer_{li}']['heavy_budget']) * config.max_position_embeddings
+                    module.recent_budget = int(budget_data['layers'][f'layer_{li}']['recent_budget']) * config.max_position_embeddings
+
+
     else:
         ENABLE_FUNCTIONS, TARGET_MODULE = load_modules(False)
 
@@ -193,20 +213,35 @@ def main():
             result = {}
 
             input_ids = tokenizer(prompt, add_special_tokens=False, return_tensors='pt').input_ids.to(model.device)
+            attention_mask = tokenizer(prompt, add_special_tokens=False, return_tensors='pt').attention_mask.to(model.device)
             if len(input_ids[0]) > args.max_length-max_tokens:
                 skipped+=1
                 print('skipped', skipped)
 
             else:
+                seq_len = len(input_ids[0])
+                print(f"Sequence length: {seq_len}")
+                # attention_mask = torch.tril(torch.ones(1, seq_len), diagonal=0).to(model.device)
+                # attention_mask = torch.tril(torch.ones(seq_len, seq_len), diagonal=0).to(model.device)
+
+                # turn off automatic cache behavior for transformers if we enable a small cache
+                # needed to support version bump from transformers v4.35.2 to v4.44.2
+                # purely causal construction, attention mask seems to cause issue when provided to generate
+                # so we will deal with it in the customized attention passes ourselves
                 output_sequences = model.generate(
                     input_ids=input_ids,
                     max_length=max_tokens + len(input_ids[0]),
                     temperature=temperature,
-                    top_k=args.k,
+                    top_k=1,
                     top_p=1,
                     do_sample=True,
                     num_return_sequences=1,
-                    return_dict_in_generate=True, output_scores=True,
+                    return_dict_in_generate=True,
+                    output_scores=True,
+                    use_cache=True,
+                    attention_mask=attention_mask,
+                    # top_k=args.k,
+                    # use_cache=(not args.enable_small_cache),
                 )
 
                 for name, m in model.named_modules():
