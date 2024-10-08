@@ -23,7 +23,7 @@ __all__ = ['convert_kvcache_falcon_sparse', 'FalconAttentionSparse', 'convert_kv
 
 
 class FalconAttentionSparse(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_idx=None):
         super().__init__()
 
         self.config = config
@@ -33,6 +33,8 @@ class FalconAttentionSparse(nn.Module):
         self.split_size = self.hidden_size
         self.hidden_dropout = config.hidden_dropout
         self.is_causal = True
+
+        self.layer_idx = layer_idx
 
         if self.head_dim * self.num_heads != self.hidden_size:
             raise ValueError(
@@ -208,18 +210,17 @@ class FalconAttentionSparse(nn.Module):
         value_layer = value_layer.transpose(1, 2).reshape(batch_size * num_kv_heads, query_length, self.head_dim)
 
         # doesn't do anything, had to disable for compatibility with transformers version
-        past_kv_length = 0 if layer_past is None else layer_past[0].shape[1]
+        # past_kv_length = 0 if layer_past is None else layer_past[0].shape[1]
 
         query_layer, key_layer = self.maybe_rotary(query_layer, key_layer, self.past_kv_length, position_ids)
-        self.past_kv_length += query_length
 
+        # we'll use a dynamic cache to support the behavior we want
+        # original implementation in LESS, strangely, doesn't come with actually correct generative behavior
         if layer_past is not None:
-            past_key, past_value = layer_past
-            # concatenate along seq_length dimension:
-            #  - key: [batch_size * self.num_heads, kv_length, head_dim]
-            #  - value: [batch_size * self.num_heads, kv_length, head_dim]
-            key_layer = torch.cat((past_key, key_layer), dim=1)
-            value_layer = torch.cat((past_value, value_layer), dim=1)
+            if len(layer_past) == self.layer_idx:
+                layer_past.key_cache.append([])
+                layer_past.value_cache.append([])
+            key_layer, value_layer = layer_past.update(key_layer, value_layer, self.layer_idx)
 
         _, kv_length, _ = key_layer.shape
         if use_cache:
@@ -230,11 +231,16 @@ class FalconAttentionSparse(nn.Module):
         query_layer_ = query_layer.reshape(batch_size, self.num_heads, -1, self.head_dim)
         key_layer_ = key_layer.reshape(batch_size, num_kv_heads, -1, self.head_dim)
         value_layer_ = value_layer.reshape(batch_size, num_kv_heads, -1, self.head_dim)
-
         
         if alibi is None:
             attention_scores = query_layer_ @ key_layer_.transpose(-1, -2)
             attention_scores /= math.sqrt(self.head_dim)
+
+            # may have to fix for parallel cases, later
+            if attention_mask is None and self.past_kv_length == 0:
+                attention_mask = torch.triu(torch.ones((1, 1, query_length, query_length)), diagonal=1).to(attention_scores.device) * -1e3
+            elif attention_mask is None:
+                attention_mask = torch.zeros((1, 1, query_length, self.past_kv_length + 1)).to(attention_scores.device)
 
             if self.attention_masks_next is not None:
                 attention_scores = attention_scores * self.attention_masks_next + (1 - self.attention_masks_next) * torch.finfo(attention_scores.dtype).min
@@ -274,9 +280,8 @@ class FalconAttentionSparse(nn.Module):
                         #H2O
                         _, keep_topk = selected_set.topk(k=self.heavy_budget, dim=-1, largest=True)
                         attn_mask = attn_mask.scatter(-1, keep_topk, 1)
-            
 
-            
+
             # prev_mask = self.attention_masks_next
             self.attention_masks_next = attn_mask.unsqueeze(0).unsqueeze(2)
             score_mask = attn_mask[:,:-1]
@@ -292,10 +297,11 @@ class FalconAttentionSparse(nn.Module):
 
             output_tensor = self.dense(attn_output)
 
+            self.past_kv_length += query_length
             if output_attentions:
-                return output_tensor, present, attention_scores
+                return output_tensor, layer_past, attention_scores
             else:
-                return output_tensor, present
+                return output_tensor, layer_past
 
         else:
             raise NotImplementedError("Method not implemented for ALiBi.")
@@ -333,15 +339,16 @@ class FalconAttentionSparse(nn.Module):
 
             output_tensor = self.dense(context_layer)
             
+            self.past_kv_length += query_length
             if output_attentions:
-                return output_tensor, present, attention_probs
+                return output_tensor, layer_past, attention_probs
             else:
-                return output_tensor, present
+                return output_tensor, layer_past
 
 
 
 class FalconAttentionLESS(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_idx=None):
         super().__init__()
 
         self.config = config
@@ -351,6 +358,8 @@ class FalconAttentionLESS(nn.Module):
         self.split_size = self.hidden_size
         self.hidden_dropout = config.hidden_dropout
         self.is_causal = True
+
+        self.layer_idx = layer_idx
 
         if self.head_dim * self.num_heads != self.hidden_size:
             raise ValueError(
@@ -575,6 +584,15 @@ class FalconAttentionLESS(nn.Module):
             present = (key_layer, value_layer)
         else:
             present = None
+        
+        # have to update and pass back at least one key and value
+        if layer_past is not None:
+            if len(layer_past) == 0:
+                layer_past.key_cache.append([])
+                layer_past.value_cache.append([])
+            
+            layer_past.key_cache[self.layer_idx] = key_layer
+            layer_past.value_cache[self.layer_idx] = value_layer
 
         query_layer_ = query_layer.reshape(batch_size, self.num_heads, -1, self.head_dim)
         key_layer_ = key_layer.reshape(batch_size, num_kv_heads, -1, self.head_dim)
@@ -686,9 +704,9 @@ class FalconAttentionLESS(nn.Module):
             output_tensor = self.dense(attn_output)
 
             if output_attentions:
-                return output_tensor, present, attention_scores
+                return output_tensor, layer_past, attention_scores
             else:
-                return output_tensor, present
+                return output_tensor, layer_past
 
         else:
             raise NotImplementedError("Method not implemented for ALiBi.")
@@ -727,9 +745,9 @@ class FalconAttentionLESS(nn.Module):
             output_tensor = self.dense(context_layer)
             
             if output_attentions:
-                return output_tensor, present, attention_probs
+                return output_tensor, layer_past, attention_probs
             else:
-                return output_tensor, present
+                return output_tensor, layer_past
 
 
 
@@ -741,7 +759,7 @@ def convert_kvcache_falcon_sparse(model, config):
                 model._modules[name] = change_class(module, config)
 
             if isinstance(module, FalconAttention):
-                model._modules[name] = FalconAttentionSparse(config)
+                model._modules[name] = FalconAttentionSparse(config, layer_idx=module.layer_idx)
 
         return model
     checkpoint = copy.deepcopy(model.state_dict())
@@ -758,8 +776,7 @@ def convert_kvcache_falcon_less(model, config, path_func):
                 model._modules[name] = change_class(module, config)
 
             if isinstance(module, FalconAttention):
-
-                model._modules[name] = FalconAttentionLESS(config)
+                model._modules[name] = FalconAttentionLESS(config, layer_idx=module.layer_idx)
 
         return model
     checkpoint = copy.deepcopy(model.state_dict())
