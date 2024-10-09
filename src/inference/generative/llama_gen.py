@@ -18,7 +18,7 @@ __all__ = ['convert_kvcache_llama_sparse', 'LlamaAttentionSparse', 'convert_kvca
 class LlamaAttentionSparse(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: LlamaConfig, layer_idx=None):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -64,6 +64,7 @@ class LlamaAttentionSparse(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
         assert bsz == 1
@@ -86,9 +87,9 @@ class LlamaAttentionSparse(nn.Module):
 
         if past_key_value is not None:
             if len(past_key_value) == self.layer_idx:
-                layer_past.key_cache.append([])
-                layer_past.value_cache.append([])
-            key_layer, value_layer = layer_past.update(key_layer, value_layer, self.layer_idx)
+                past_key_value.key_cache.append([])
+                past_key_value.value_cache.append([])
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx)
         
         # if past_key_value is not None:
         #     # reuse k, v, self_attention
@@ -181,7 +182,7 @@ class LlamaAttentionSparse(nn.Module):
 class LlamaAttentionLESS(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: LlamaConfig, layer_idx=None):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -261,6 +262,7 @@ class LlamaAttentionLESS(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
         assert bsz == 1
