@@ -105,6 +105,9 @@ class LlamaAttentionSparse(nn.Module):
                 f" {attn_weights.size()}"
             )
 
+        if attention_mask is None and q_len > 1:
+            attention_mask = torch.triu(torch.ones((bsz, 1, q_len, kv_seq_len)), diagonal=(1 + self.past_kv_length)).to(attn_weights.device) * -1e3
+
         if attention_mask is not None:
             if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
                 raise ValueError(
