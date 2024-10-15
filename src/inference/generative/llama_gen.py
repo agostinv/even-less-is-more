@@ -116,6 +116,7 @@ class LlamaAttentionSparse(nn.Module):
             attn_weights = attn_weights + attention_mask
             attn_weights = torch.max(attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min))
 
+        print(attention_mask)
         
         if self.attention_masks_next is not None:
             attn_weights = attn_weights * self.attention_masks_next + (1 - self.attention_masks_next) * torch.finfo(attn_weights.dtype).min
@@ -178,6 +179,7 @@ class LlamaAttentionSparse(nn.Module):
         if not output_attentions:
             attn_weights = None
         
+        self.past_kv_length += q_len
         return attn_output, attn_weights, past_key_value
 
 
@@ -419,6 +421,7 @@ class LlamaAttentionLESS(nn.Module):
         if not output_attentions:
             attn_weights = None
 
+        self.past_kv_length += q_len
         return attn_output, attn_weights, past_key_value
 
 
@@ -430,7 +433,7 @@ def convert_kvcache_llama_sparse(model, config):
                 model._modules[name] = change_class(module, config)
 
             if isinstance(module, LlamaAttention):
-                model._modules[name] = LlamaAttentionSparse(config)
+                model._modules[name] = LlamaAttentionSparse(config, layer_idx=module.layer_idx)
 
         return model
     checkpoint = copy.deepcopy(model.state_dict())
@@ -446,7 +449,7 @@ def convert_kvcache_llama_less(model, config, path_func):
                 model._modules[name] = change_class(module, config)
 
             if isinstance(module, LlamaAttention):
-                model._modules[name] = LlamaAttentionLESS(config)
+                model._modules[name] = LlamaAttentionLESS(config, layer_idx=module.layer_idx)
 
         return model
     checkpoint = copy.deepcopy(model.state_dict())
