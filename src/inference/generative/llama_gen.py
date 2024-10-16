@@ -91,12 +91,6 @@ class LlamaAttentionSparse(nn.Module):
                 past_key_value.value_cache.append([])
             key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx)
         
-        # if past_key_value is not None:
-        #     # reuse k, v, self_attention
-        #     key_states = torch.cat([past_key_value[0], key_states], dim=2)
-        #     value_states = torch.cat([past_key_value[1], value_states], dim=2)
-
-        # past_key_value = (key_states, value_states) if use_cache else None
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
         if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
@@ -285,22 +279,14 @@ class LlamaAttentionLESS(nn.Module):
         #     kv_seq_len += past_key_value[0].shape[-2]
         kv_seq_len += self.past_kv_length
         cos, sin = self.rotary_emb(value_states, position_ids=position_ids)
-        # cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
         # [bsz, nh, t, hd]
 
-        # if past_key_value is not None:
-        #     # reuse k, v, self_attention
-        #     key_states = torch.cat([past_key_value[0], key_states], dim=2)
-        #     value_states = torch.cat([past_key_value[1], value_states], dim=2)
-        
         if past_key_value is not None:
             if len(past_key_value) == self.layer_idx:
                 layer_past.key_cache.append([])
                 layer_past.value_cache.append([])
             key_layer, value_layer = layer_past.update(key_layer, value_layer, self.layer_idx)
-
-        # past_key_value = (key_states, value_states) if use_cache else None
 
         
         query_states_ker = self.ker_act(torch.einsum('bhsd,hde->bhse', query_states, self.kernel_q_mat1))

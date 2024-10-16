@@ -24,13 +24,15 @@ __all__ = [
 class LlamaAttentionSparse(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: LlamaConfig, layer_idx=None):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = self.hidden_size // self.num_heads
         self.max_position_embeddings = config.max_position_embeddings
+
+        self.layer_idx = layer_idx
 
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
@@ -69,16 +71,15 @@ class LlamaAttentionSparse(nn.Module):
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
             kv_seq_len += past_key_value[0].shape[-2]
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        cos, sin = self.rotary_emb(value_states, position_ids=position_ids)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
         # [bsz, nh, t, hd]
 
         if past_key_value is not None:
-            # reuse k, v, self_attention
-            key_states = torch.cat([past_key_value[0], key_states], dim=2)
-            value_states = torch.cat([past_key_value[1], value_states], dim=2)
-
-        past_key_value = (key_states, value_states) if use_cache else None
+            if len(past_key_value) == self.layer_idx:
+                layer_past.key_cache.append([])
+                layer_past.value_cache.append([])
+            key_layer, value_layer = layer_past.update(key_layer, value_layer, self.layer_idx)
 
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
@@ -151,13 +152,15 @@ class LlamaAttentionSparse(nn.Module):
 class LlamaAttentionLESS(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: LlamaConfig, layer_idx=None):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = self.hidden_size // self.num_heads
         self.max_position_embeddings = config.max_position_embeddings
+
+        self.layer_idx = layer_idx
         
         if (self.head_dim * self.num_heads) != self.hidden_size:
             raise ValueError(
@@ -221,16 +224,15 @@ class LlamaAttentionLESS(nn.Module):
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
             kv_seq_len += past_key_value[0].shape[-2]
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        cos, sin = self.rotary_emb(value_states, position_ids=position_ids)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
         # [bsz, nh, t, hd]
 
         if past_key_value is not None:
-            # reuse k, v, self_attention
-            key_states = torch.cat([past_key_value[0], key_states], dim=2)
-            value_states = torch.cat([past_key_value[1], value_states], dim=2)
-
-        past_key_value = (key_states, value_states) if use_cache else None
+            if len(past_key_value) == self.layer_idx:
+                past_key_value.key_cache.append([])
+                past_key_value.value_cache.append([])
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx)
 
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
@@ -240,6 +242,9 @@ class LlamaAttentionLESS(nn.Module):
                 f" {attn_weights.size()}"
             )
 
+        if attention_mask is None:
+            attention_mask = torch.triu(torch.ones((bsz, 1, q_len, kv_seq_len)), diagonal=(1 + self.past_kv_length)).to(attn_weights.device) * -1e3
+        
         if attention_mask is not None:
             if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
                 raise ValueError(
@@ -321,7 +326,7 @@ def convert_kvcache_llama_sparse(model, config):
                 model._modules[name] = change_class(module, config)
 
             if isinstance(module, LlamaAttention):
-                model._modules[name] = LlamaAttentionSparse(config)
+                model._modules[name] = LlamaAttentionSparse(config, layer_idx=module.layer_idx)
 
         return model
 
@@ -338,7 +343,7 @@ def convert_kvcache_llama_less(model, config, path_func):
                 model._modules[name] = change_class(module, config)
 
             if isinstance(module, LlamaAttention):
-                model._modules[name] = LlamaAttentionLESS(config)
+                model._modules[name] = LlamaAttentionLESS(config, layer_idx=module.layer_idx)
 
         return model
     checkpoint = copy.deepcopy(model.state_dict())
