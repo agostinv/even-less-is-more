@@ -64,6 +64,8 @@ class LlamaAttentionSparse(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
@@ -259,6 +261,8 @@ class LlamaAttentionLESS(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
@@ -284,10 +288,9 @@ class LlamaAttentionLESS(nn.Module):
 
         if past_key_value is not None:
             if len(past_key_value) == self.layer_idx:
-                layer_past.key_cache.append([])
-                layer_past.value_cache.append([])
-            key_layer, value_layer = layer_past.update(key_layer, value_layer, self.layer_idx)
-
+                past_key_value.key_cache.append([])
+                past_key_value.value_cache.append([])
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx)
         
         query_states_ker = self.ker_act(torch.einsum('bhsd,hde->bhse', query_states, self.kernel_q_mat1))
         query_states_ker = self.kernel_f(torch.einsum('bhsd,hde->bhse', query_states_ker, self.kernel_q_mat2))

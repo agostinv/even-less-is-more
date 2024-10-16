@@ -13,28 +13,45 @@ from inference.parallel.falcon import convert_kvcache_falcon_sparse, convert_kvc
 
 logging.getLogger("openai").setLevel(logging.WARNING)
 
-
-
-ENABLE_SPARSE_FUNCTIONS = {
-    "llama2": convert_kvcache_llama_sparse,
-    "falcon": convert_kvcache_falcon_sparse
-}
-
-ENABLE_LESS_FUNCTIONS = {
-    "llama2": convert_kvcache_llama_less,
-    "falcon": convert_kvcache_falcon_less,
-}
-
-
+def set_seed(args):
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    
 models_sizes_dict = {
     'llama2': ['7b', '13b', '70b'],
     'falcon': ['7b', '40b'],
 }
 
 hugging_name_dict = {
-    'llama2': lambda x: f'meta-llama/Llama-2-{x}-hf',
-    'falcon': lambda x: f'tiiuae/falcon-{x}'
+    'llama2': lambda x: f'meta-llama/Llama-2-{x}-hf', 
+    'falcon': lambda x: f'tiiuae/falcon-{x}',
 }
+
+
+def load_modules(use_low_rank):
+    from inference.parallel.llama import convert_kvcache_llama_sparse, LlamaAttentionSparse, convert_kvcache_llama_less, LlamaAttentionLESS
+    from inference.parallel.falcon import convert_kvcache_falcon_sparse, FalconAttentionSparse, convert_kvcache_falcon_less, FalconAttentionLESS
+
+    if not use_low_rank:
+        ENABLE_FUNCTIONS = {
+            "llama2": convert_kvcache_llama_sparse,
+            "falcon": convert_kvcache_falcon_sparse
+        }
+        TARGET_MODULE = {
+            "llama2": LlamaAttentionSparse,
+            'falcon': FalconAttentionSparse
+        }
+    else:
+        ENABLE_FUNCTIONS = {
+            "llama2": convert_kvcache_llama_less,
+            "falcon": convert_kvcache_falcon_less
+        }
+        TARGET_MODULE = {
+            "llama2": LlamaAttentionLESS,
+            'falcon': FalconAttentionLESS
+        }
+    return ENABLE_FUNCTIONS, TARGET_MODULE
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -121,11 +138,13 @@ def main():
         config.kernel_hidden_size = args.ker_dim
         config.ker_hid = args.ker_hid
         
+        ENABLE_FUNCTIONS, TARGET_MODULE = load_modules(saved_model_name != '')
+        
         if saved_model_name == '':
-            model = ENABLE_SPARSE_FUNCTIONS[args.model_arch](model, config)
+            model = ENABLE_FUNCTIONS[args.model_arch](model, config)
         else:
             path_func = lambda li: f'../checkpoints/{saved_model_name}/layer_{li}.pth'
-            model = ENABLE_LESS_FUNCTIONS[args.model_arch](model, config, path_func)
+            model = ENABLE_FUNCTIONS[args.model_arch](model, config, path_func)
         
         fallback_count = num_layers
         if args.budget_config is not None:

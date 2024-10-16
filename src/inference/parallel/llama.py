@@ -61,6 +61,8 @@ class LlamaAttentionSparse(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
         
@@ -69,17 +71,17 @@ class LlamaAttentionSparse(nn.Module):
         value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
 
         kv_seq_len = key_states.shape[-2]
-        if past_key_value is not None:
-            kv_seq_len += past_key_value[0].shape[-2]
+        #if past_key_value is not None:
+        #    kv_seq_len += past_key_value[0].shape[-2]
         cos, sin = self.rotary_emb(value_states, position_ids=position_ids)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
         # [bsz, nh, t, hd]
 
         if past_key_value is not None:
             if len(past_key_value) == self.layer_idx:
-                layer_past.key_cache.append([])
-                layer_past.value_cache.append([])
-            key_layer, value_layer = layer_past.update(key_layer, value_layer, self.layer_idx)
+                past_key_value.key_cache.append([])
+                past_key_value.value_cache.append([])
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx)
 
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
@@ -212,6 +214,8 @@ class LlamaAttentionLESS(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
         
@@ -222,8 +226,8 @@ class LlamaAttentionLESS(nn.Module):
         attention_mask = attention_mask.to(query_states.dtype)
         
         kv_seq_len = key_states.shape[-2]
-        if past_key_value is not None:
-            kv_seq_len += past_key_value[0].shape[-2]
+        #if past_key_value is not None:
+        #    kv_seq_len += past_key_value[0].shape[-2]
         cos, sin = self.rotary_emb(value_states, position_ids=position_ids)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
         # [bsz, nh, t, hd]
