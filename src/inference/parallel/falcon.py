@@ -59,6 +59,7 @@ class FalconAttentionSparse(nn.Module):
         self.num_kv_heads = config.num_kv_heads if (self.new_decoder_architecture or not self.multi_query) else 1
         
         assert self.multi_query
+        self.fixed_budget = config.fixed_count
         self.heavy_budget = config.heavy_count
         self.recent_budget = config.recent_count
         self.fix_heavy_to_initial_tokens = config.fix_heavy_to_initial_tokens
@@ -344,6 +345,7 @@ class FalconAttentionLESS(nn.Module):
         self.num_kv_heads = config.num_kv_heads if (self.new_decoder_architecture or not self.multi_query) else 1
         
         assert self.multi_query
+        self.fixed_budget = config.fixed_count
         self.heavy_budget = config.heavy_count
         self.recent_budget = config.recent_count
         self.fix_heavy_to_initial_tokens = config.fix_heavy_to_initial_tokens

@@ -45,6 +45,7 @@ class LlamaAttentionSparse(nn.Module):
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
         self.rotary_emb = LlamaRotaryEmbedding(self.head_dim, max_position_embeddings=self.max_position_embeddings)
 
+        self.fixed_budget = config.fixed_count
         self.heavy_budget = config.heavy_count
         self.recent_budget = config.recent_count
         self.fix_heavy_to_initial_tokens = config.fix_heavy_to_initial_tokens
@@ -175,6 +176,7 @@ class LlamaAttentionLESS(nn.Module):
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
         self.rotary_emb = LlamaRotaryEmbedding(self.head_dim, max_position_embeddings=self.max_position_embeddings)
 
+        self.fixed_budget = config.fixed_count
         self.heavy_budget = config.heavy_count
         self.recent_budget = config.recent_count
         self.fix_heavy_to_initial_tokens = config.fix_heavy_to_initial_tokens

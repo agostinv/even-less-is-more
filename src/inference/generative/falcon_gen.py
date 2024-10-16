@@ -61,6 +61,7 @@ class FalconAttentionSparse(nn.Module):
         self.num_kv_heads = config.num_kv_heads if (self.new_decoder_architecture or not self.multi_query) else 1
         
         assert self.multi_query
+        self.fixed_budget = config.fixed_count
         self.heavy_budget = config.heavy_count
         self.recent_budget = config.recent_count
         self.cache_budget = self.heavy_budget + self.recent_budget
@@ -272,6 +273,10 @@ class FalconAttentionSparse(nn.Module):
                     # self.previous_scores # (k-Cache - 1)
                     selected_set = self.previous_scores
 
+                if not self.fixed_budget == 0:
+                    attn_mask[:, :self.fixed_budget] = 1
+                    selected_set = selected_set[:, self.fixed_budget:]
+
                 if not self.heavy_budget == 0:
                     if self.fix_heavy_to_initial_tokens:
                         #Lambda
@@ -387,6 +392,7 @@ class FalconAttentionLESS(nn.Module):
         
         assert self.multi_query
         
+        self.fixed_budget = config.fixed_count
         self.heavy_budget = config.heavy_count
         self.recent_budget = config.recent_count
         self.cache_budget = self.heavy_budget + self.recent_budget
@@ -662,6 +668,10 @@ class FalconAttentionLESS(nn.Module):
                     # activate historical best self.cache_budget - self.recent_budget tokens.
                     # self.previous_scores # (k-Cache - 1)
                     selected_set = self.previous_scores
+                
+                if not self.fixed_budget == 0:
+                    attn_mask[:, :self.fixed_budget] = 1
+                    selected_set = selected_set[:, self.fixed_budget:]
 
                 if not self.heavy_budget == 0:
                     if self.fix_heavy_to_initial_tokens:

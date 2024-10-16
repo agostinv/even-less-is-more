@@ -37,6 +37,7 @@ class LlamaAttentionSparse(nn.Module):
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
         self.rotary_emb = LlamaRotaryEmbedding(self.head_dim, max_position_embeddings=self.max_position_embeddings)
 
+        self.fixed_budget = config.fixed_count
         self.heavy_budget = config.heavy_count
         self.recent_budget = config.recent_count
         self.cache_budget = self.heavy_budget + self.recent_budget
@@ -141,6 +142,10 @@ class LlamaAttentionSparse(nn.Module):
                 # activate historical best self.cache_budget - self.recent_budget tokens.
                 # self.previous_scores # (k-Cache - 1)
                 selected_set = self.previous_scores
+                
+            if not self.fixed_budget == 0:
+                attn_mask[:, :self.fixed_budget] = 1
+                selected_set = selected_set[:, self.fixed_budget:]
 
             if not self.heavy_budget == 0:
                 if self.fix_heavy_to_initial_tokens:
@@ -200,7 +205,7 @@ class LlamaAttentionLESS(nn.Module):
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
         self.rotary_emb = LlamaRotaryEmbedding(self.head_dim, max_position_embeddings=self.max_position_embeddings)
 
-        # self.fixed_count = config.fixed_sparse_count
+        self.fixed_budget = config.fixed_count
         self.heavy_budget = config.heavy_count
         self.recent_budget = config.recent_count
         self.cache_budget = self.heavy_budget + self.recent_budget
@@ -363,6 +368,10 @@ class LlamaAttentionLESS(nn.Module):
                 # activate historical best self.cache_budget - self.recent_budget tokens.
                 # self.previous_scores # (k-Cache - 1)
                 selected_set = self.previous_scores
+                
+            if not self.fixed_budget == 0:
+                attn_mask[:, :self.fixed_budget] = 1
+                selected_set = selected_set[:, self.fixed_budget:]
 
             if not self.heavy_budget == 0:
                 if self.fix_heavy_to_initial_tokens:

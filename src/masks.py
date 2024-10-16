@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 
-def local_heavy_hitter_mask_nonoverlap(attn_weights, heavy_budget, recent_budget, no_padding_seq_length=None, multi_query=False, attention_score_decay=1.0):
+def local_heavy_hitter_mask_nonoverlap(attn_weights, fixed_budget, heavy_budget, recent_budget, no_padding_seq_length=None, multi_query=False, attention_score_decay=1.0):
 
     # attn_weights (BS, head, query, keys)
     dtype_attn_weights = attn_weights.dtype
@@ -29,7 +29,7 @@ def local_heavy_hitter_mask_nonoverlap(attn_weights, heavy_budget, recent_budget
     attention_decay_mask = attention_decay_mask / attention_score_decay
 
     accumulated_attention_score = torch.cumsum(tmp_attn, dim=-2) #(head, keys)
-    accumulated_attention_score[:, :, :, heavy_budget+recent_budget+padding_length:] = 0
+    accumulated_attention_score[:, :, :, fixed_budget+heavy_budget+recent_budget+padding_length:] = 0
     accumulated_attention_score[:, :, :, :padding_length] = 0
 
     # decay accumulated scores so far
@@ -39,18 +39,19 @@ def local_heavy_hitter_mask_nonoverlap(attn_weights, heavy_budget, recent_budget
     if multi_query:
         mask_bottom = mask_bottom[:,0].unsqueeze(1) #B1SS
         accumulated_attention_score = accumulated_attention_score.sum(dim=1, keepdim=True) #B1S
-    mask_bottom[:,:, padding_length:heavy_budget+recent_budget+padding_length, padding_length:heavy_budget+recent_budget+padding_length] = True
+    mask_bottom[:,:, padding_length:fixed_budget+heavy_budget+recent_budget+padding_length, padding_length:fixed_budget+heavy_budget+recent_budget+padding_length] = True
 
-    for token_index in range(heavy_budget+recent_budget+padding_length, seq_length):
+    for token_index in range(fixed_budget+heavy_budget+recent_budget+padding_length, seq_length):
         
         tmp_attn_index = nn.functional.softmax(attn_weights[:,:,token_index,:], dim=-1, dtype=torch.float32).to(dtype_attn_weights)
 
         if multi_query:
             tmp_attn_index = tmp_attn_index.sum(dim=1, keepdim=True) #B1S
-        _, tmp_topk_index = accumulated_attention_score[..., token_index - 1, :token_index-recent_budget].topk(k=heavy_budget, dim=-1)
+        _, tmp_topk_index = accumulated_attention_score[..., token_index - 1, fixed_budget:token_index-recent_budget].topk(k=heavy_budget, dim=-1)
         zeros_index = torch.zeros_like(tmp_attn_index, dtype=torch.bool)
         mask_bottom_index = zeros_index.scatter(-1, tmp_topk_index, True) #(head, keys)
         
+        mask_bottom_index[:, :, :fixed_budget] = True
         mask_bottom_index[:, :, token_index-recent_budget:token_index+1] = True
 
         mask_bottom[:,:,token_index,:] = mask_bottom_index

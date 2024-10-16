@@ -93,6 +93,7 @@ def parse_args():
     
     # Evaluation Sparse Policy (does not need to the same as the trained policy)
     parser.add_argument('--enable_small_cache', action='store_true')
+    parser.add_argument("--fixed_ratio", type=float, default=0.0)
     parser.add_argument("--heavy_ratio", type=float, default=0.1)
     parser.add_argument("--recent_ratio", type=float, default=0.1)
     parser.add_argument("--budget-config", type=str, default=None) # for budget config file, overrides other options
@@ -133,6 +134,7 @@ def main():
         print('Enable Small Cache Size')
         saved_model_name = args.saved_model_name
         config.fix_heavy_to_initial_tokens = args.fix_heavy_to_initial_tokens
+        config.fixed_count = int(args.fixed_ratio * config.max_position_embeddings)
         config.heavy_count = int(args.heavy_ratio * config.max_position_embeddings)
         config.recent_count = int(args.recent_ratio * config.max_position_embeddings)
         config.kernel_hidden_size = args.ker_dim
