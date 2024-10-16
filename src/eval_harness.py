@@ -13,28 +13,45 @@ from inference.parallel.falcon import convert_kvcache_falcon_sparse, convert_kvc
 
 logging.getLogger("openai").setLevel(logging.WARNING)
 
-
-
-ENABLE_SPARSE_FUNCTIONS = {
-    "llama2": convert_kvcache_llama_sparse,
-    "falcon": convert_kvcache_falcon_sparse
-}
-
-ENABLE_LESS_FUNCTIONS = {
-    "llama2": convert_kvcache_llama_less,
-    "falcon": convert_kvcache_falcon_less,
-}
-
-
+def set_seed(args):
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    
 models_sizes_dict = {
     'llama2': ['7b', '13b', '70b'],
     'falcon': ['7b', '40b'],
 }
 
 hugging_name_dict = {
-    'llama2': lambda x: f'meta-llama/Llama-2-{x}-hf',
-    'falcon': lambda x: f'tiiuae/falcon-{x}'
+    'llama2': lambda x: f'meta-llama/Llama-2-{x}-hf', 
+    'falcon': lambda x: f'tiiuae/falcon-{x}',
 }
+
+
+def load_modules(use_low_rank):
+    from inference.parallel.llama import convert_kvcache_llama_sparse, LlamaAttentionSparse, convert_kvcache_llama_less, LlamaAttentionLESS
+    from inference.parallel.falcon import convert_kvcache_falcon_sparse, FalconAttentionSparse, convert_kvcache_falcon_less, FalconAttentionLESS
+
+    if not use_low_rank:
+        ENABLE_FUNCTIONS = {
+            "llama2": convert_kvcache_llama_sparse,
+            "falcon": convert_kvcache_falcon_sparse
+        }
+        TARGET_MODULE = {
+            "llama2": LlamaAttentionSparse,
+            'falcon': FalconAttentionSparse
+        }
+    else:
+        ENABLE_FUNCTIONS = {
+            "llama2": convert_kvcache_llama_less,
+            "falcon": convert_kvcache_falcon_less
+        }
+        TARGET_MODULE = {
+            "llama2": LlamaAttentionLESS,
+            'falcon': FalconAttentionLESS
+        }
+    return ENABLE_FUNCTIONS, TARGET_MODULE
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -78,6 +95,7 @@ def parse_args():
     parser.add_argument('--enable_small_cache', action='store_true')
     parser.add_argument("--heavy_ratio", type=float, default=0.1)
     parser.add_argument("--recent_ratio", type=float, default=0.1)
+    parser.add_argument("--budget-config", type=str, default=None) # for budget config file, overrides other options
     parser.add_argument('--fix_heavy_to_initial_tokens', action='store_true')
     
     # Kernels
@@ -108,7 +126,8 @@ def main():
     config = AutoConfig.from_pretrained(model_name, cache_dir=args.cache_dir)
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False, cache_dir=args.cache_dir)
     model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir=args.cache_dir)
-
+    
+    num_layers = config.num_hidden_layers
     
     if args.enable_small_cache:
         print('Enable Small Cache Size')
@@ -119,11 +138,37 @@ def main():
         config.kernel_hidden_size = args.ker_dim
         config.ker_hid = args.ker_hid
         
+        ENABLE_FUNCTIONS, TARGET_MODULE = load_modules(saved_model_name != '')
+        
         if saved_model_name == '':
-            model = ENABLE_SPARSE_FUNCTIONS[args.model_arch](model, config)
+            model = ENABLE_FUNCTIONS[args.model_arch](model, config)
         else:
             path_func = lambda li: f'../checkpoints/{saved_model_name}/layer_{li}.pth'
-            model = ENABLE_LESS_FUNCTIONS[args.model_arch](model, config, path_func)
+            model = ENABLE_FUNCTIONS[args.model_arch](model, config, path_func)
+        
+        fallback_count = num_layers
+        if args.budget_config is not None:
+            budget_data = yaml.load(file, Loader=yaml.FullLoader)
+
+            assert args.model_arch.lower() in budget_data['model'], f"Model {args.model_arch} doesn't match contents of config."
+            assert model_size_name.lower() in budget_data['model'], f"Model size set to {model_size_name} doesn't match contents of config."
+
+            for name, module in reversed(model._modules.items()):
+                if isinstance(module, TARGET_MODULE[args.model_arch]):
+                    li = module.layer_idx
+                    if li == None:
+                        li = fallback_count - 1
+                        module.layer_idx = li
+                        fallback_count -= 1
+
+                    assert f'layer_{li}' in budget_data['layers'].keys(), f"Didn't find layer {li} in budget config when it was expected. " \
+                        + "Double check config and expected number of layers for model."
+
+                    module.fixed_budget = int(budget_data['layers'][f'layer_{li}']['fixed_budget']) * config.max_position_embeddings 
+                    module.heavy_budget = int(budget_data['layers'][f'layer_{li}']['heavy_budget']) * config.max_position_embeddings
+                    module.recent_budget = int(budget_data['layers'][f'layer_{li}']['recent_budget']) * config.max_position_embeddings
+    else:
+        ENABLE_FUNCTIONS, TARGET_MODULE = load_modules(False)
         
     model = model.half()
     model = model.eval().to(args.device)

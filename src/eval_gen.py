@@ -230,9 +230,6 @@ def main():
 
                 # attention_mask = torch.tril(torch.ones(1, seq_len), diagonal=0).to(model.device)
                 # attention_mask = torch.tril(torch.ones(seq_len, seq_len), diagonal=0).to(model.device)
-
-                # turn off automatic cache behavior for transformers if we enable a small cache
-                # needed to support version bump from transformers v4.35.2 to v4.44.2
                 output_sequences = model.generate(
                     input_ids=input_ids,
                     max_length=max_tokens + len(input_ids[0]),

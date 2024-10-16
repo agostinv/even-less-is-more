@@ -568,16 +568,18 @@ class FalconAttentionLESS(nn.Module):
         )
         value_layer = value_layer.transpose(1, 2).reshape(batch_size * num_kv_heads, query_length, self.head_dim)
 
-        past_kv_length = 0 if layer_past is None else layer_past[0].shape[1]
+        # doesn't do anything, had to disable for compatibility with transformers version
+        # past_kv_length = 0 if layer_past is None else layer_past[0].shape[1]
+        
         query_layer, key_layer = self.maybe_rotary(query_layer, key_layer, past_kv_length, position_ids)
 
+        # we'll use a dynamic cache to support the behavior we want
+        # original implementation in LESS, strangely, doesn't come with actually correct generative behavior
         if layer_past is not None:
-            past_key, past_value = layer_past
-            # concatenate along seq_length dimension:
-            #  - key: [batch_size * self.num_heads, kv_length, head_dim]
-            #  - value: [batch_size * self.num_heads, kv_length, head_dim]
-            key_layer = torch.cat((past_key, key_layer), dim=1)
-            value_layer = torch.cat((past_value, value_layer), dim=1)
+            if len(layer_past) == self.layer_idx:
+                layer_past.key_cache.append([])
+                layer_past.value_cache.append([])
+            key_layer, value_layer = layer_past.update(key_layer, value_layer, self.layer_idx)
 
         _, kv_length, _ = key_layer.shape
         if use_cache:
@@ -585,15 +587,6 @@ class FalconAttentionLESS(nn.Module):
         else:
             present = None
         
-        # have to update and pass back at least one key and value
-        if layer_past is not None:
-            if len(layer_past) == 0:
-                layer_past.key_cache.append([])
-                layer_past.value_cache.append([])
-            
-            layer_past.key_cache[self.layer_idx] = key_layer
-            layer_past.value_cache[self.layer_idx] = value_layer
-
         query_layer_ = query_layer.reshape(batch_size, self.num_heads, -1, self.head_dim)
         key_layer_ = key_layer.reshape(batch_size, num_kv_heads, -1, self.head_dim)
         value_layer_ = value_layer.reshape(batch_size, num_kv_heads, -1, self.head_dim)
@@ -612,6 +605,12 @@ class FalconAttentionLESS(nn.Module):
             attention_scores = query_layer_ @ key_layer_.transpose(-1, -2)
             attention_scores /= math.sqrt(self.head_dim)
             attention_scores = attention_scores + attention_mask
+            
+            # may have to fix for parallel cases, later
+            if attention_mask is None and self.past_kv_length == 0:
+                attention_mask = torch.triu(torch.ones((1, 1, query_length, query_length)), diagonal=1).to(attention_scores.device) * -1e3
+            elif attention_mask is None:
+                attention_mask = torch.zeros((1, 1, query_length, self.past_kv_length + 1)).to(attention_scores.device)
 
             if self.attention_masks_next is not None:
                 query_states_ker = query_states_ker.to(torch.float32)
@@ -636,7 +635,6 @@ class FalconAttentionLESS(nn.Module):
 
             attention_scores = F.softmax(attention_scores, dim=-1, dtype=torch.float32).to(hidden_states.dtype)
             current_scores_sum = attention_scores.sum(0).sum(0).sum(dim=0, keepdim=True) # (1, k-tokens)
-
 
 
             # Accumulate attention scores
