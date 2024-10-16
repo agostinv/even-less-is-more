@@ -224,6 +224,7 @@ class FalconAttentionSparse(nn.Module):
             attention_scores /= math.sqrt(self.head_dim)
             
             ### Heavy + Recent
+            fixed_budget = self.fixed_budget
             heavy_budget = self.heavy_budget
             recent_budget = self.recent_budget
 
@@ -235,7 +236,7 @@ class FalconAttentionSparse(nn.Module):
                     mask_bottom[..., :heavy_budget] = True
                 else:
                     #H2O
-                    mask_bottom = local_heavy_hitter_mask_nonoverlap(attention_scores, heavy_budget, recent_budget, multi_query=True) # Default: No padding applied to input
+                    mask_bottom = local_heavy_hitter_mask_nonoverlap(attention_scores, fixed_budget, heavy_budget, recent_budget, multi_query=True) # Default: No padding applied to input
                 
             else:
                 mask_bottom = torch.zeros_like(attention_scores[:, 0], dtype=torch.bool).unsqueeze(1)
@@ -538,12 +539,15 @@ class FalconAttentionLESS(nn.Module):
         key_layer_ = key_layer.reshape(batch_size, num_kv_heads, -1, self.head_dim)
         value_layer_ = value_layer.reshape(batch_size, num_kv_heads, -1, self.head_dim)
 
+        if attention_mask is None:
+            attention_mask = torch.triu(torch.ones((bsz, 1, q_len, kv_seq_len)), diagonal=(1 + self.past_kv_length)).to(attn_weights.device) * -1e3
         
         if alibi is None:
             attention_scores = query_layer_ @ key_layer_.transpose(-1, -2)
             attention_scores /= math.sqrt(self.head_dim)
             
-            ### Heavy + Recent
+            ### Fixed + Heavy + Recent
+            fixed_budget = self.fixed_budget
             heavy_budget = self.heavy_budget
             recent_budget = self.recent_budget
 
@@ -555,7 +559,7 @@ class FalconAttentionLESS(nn.Module):
                     mask_bottom[..., :heavy_budget] = True
                 else:
                     #H2O
-                    mask_bottom = local_heavy_hitter_mask_nonoverlap(attention_scores, heavy_budget, recent_budget, multi_query=True) # Default: No padding applied to input
+                    mask_bottom = local_heavy_hitter_mask_nonoverlap(attention_scores, fixed_budget, heavy_budget, recent_budget, multi_query=True) # Default: No padding applied to input
             else:
                 mask_bottom = torch.zeros_like(attention_scores[:, 0], dtype=torch.bool).unsqueeze(1)
 

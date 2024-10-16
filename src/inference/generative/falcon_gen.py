@@ -284,13 +284,14 @@ class FalconAttentionSparse(nn.Module):
                     else:
                         #H2O
                         _, keep_topk = selected_set.topk(k=self.heavy_budget, dim=-1, largest=True)
-                        attn_mask = attn_mask.scatter(-1, keep_topk, 1)
+                        attn_mask = attn_mask.scatter(-1, self.fixed_budget + keep_topk, 1)
 
 
             # prev_mask = self.attention_masks_next
             self.attention_masks_next = attn_mask.unsqueeze(0).unsqueeze(2)
             score_mask = attn_mask[:,:-1]
             score_mask[:, -self.recent_budget:] = 1
+            score_mask[:, :self.fixed_budget] = 1
             self.previous_scores = self.previous_scores * score_mask
 
 
@@ -680,12 +681,13 @@ class FalconAttentionLESS(nn.Module):
                     else:
                         #H2O
                         _, keep_topk = selected_set.topk(k=self.heavy_budget, dim=-1, largest=True)
-                        attn_mask = attn_mask.scatter(-1, keep_topk, 1)
+                        attn_mask = attn_mask.scatter(-1, self.fixed_budget + keep_topk, 1)
 
             prev_mask = self.attention_masks_next
             self.attention_masks_next = attn_mask.unsqueeze(0).unsqueeze(2)
             score_mask = attn_mask[:,:-1]
             score_mask[:, -self.recent_budget:] = 1
+            score_mask[:, :self.fixed_budget] = 1
             self.previous_scores = self.previous_scores * score_mask
 
             if prev_mask is not None:

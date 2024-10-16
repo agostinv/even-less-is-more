@@ -49,7 +49,7 @@ def local_heavy_hitter_mask_nonoverlap(attn_weights, fixed_budget, heavy_budget,
             tmp_attn_index = tmp_attn_index.sum(dim=1, keepdim=True) #B1S
         _, tmp_topk_index = accumulated_attention_score[..., token_index - 1, fixed_budget:token_index-recent_budget].topk(k=heavy_budget, dim=-1)
         zeros_index = torch.zeros_like(tmp_attn_index, dtype=torch.bool)
-        mask_bottom_index = zeros_index.scatter(-1, tmp_topk_index, True) #(head, keys)
+        mask_bottom_index = zeros_index.scatter(-1, fixed_budget + tmp_topk_index, True) #(head, keys)
         
         mask_bottom_index[:, :, :fixed_budget] = True
         mask_bottom_index[:, :, token_index-recent_budget:token_index+1] = True

@@ -101,6 +101,7 @@ class LlamaAttentionSparse(nn.Module):
             attn_weights = torch.max(attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min))
 
         ### Heavy + Recent
+        fixed_budget = self.fixed_budget
         heavy_budget = self.heavy_budget
         recent_budget = self.recent_budget
 
@@ -112,7 +113,7 @@ class LlamaAttentionSparse(nn.Module):
                 mask_bottom[..., :heavy_budget] = True
             else:
                 # H2O
-                mask_bottom = local_heavy_hitter_mask_nonoverlap(attn_weights, heavy_budget, recent_budget) # Default: No padding applied to input
+                mask_bottom = local_heavy_hitter_mask_nonoverlap(attn_weights, fixed_budget, heavy_budget, recent_budget) # Default: No padding applied to input
         else:
             mask_bottom = torch.zeros_like(attn_weights, dtype=torch.bool)
 
@@ -124,7 +125,7 @@ class LlamaAttentionSparse(nn.Module):
 
         del ones, key_states, hidden_states
         torch.cuda.empty_cache()
-        attn_weights[~mask_bottom] = torch.min(attention_mask)
+        attn_weights[~mask_bottom] = 1e-6 # torch.min(attention_mask)
         del mask_bottom
         torch.cuda.empty_cache()
 
@@ -225,7 +226,7 @@ class LlamaAttentionLESS(nn.Module):
         key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-        attention_mask = attention_mask.to(query_states.dtype)
+        # attention_mask = attention_mask.to(query_states.dtype)
         
         kv_seq_len = key_states.shape[-2]
         #if past_key_value is not None:
@@ -259,6 +260,7 @@ class LlamaAttentionLESS(nn.Module):
             attn_weights = attn_weights + attention_mask
             attn_weights = torch.max(attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min))
 
+        fixed_budget = self.fixed_budget
         heavy_budget = self.heavy_budget
         recent_budget = self.recent_budget
 
@@ -268,7 +270,7 @@ class LlamaAttentionLESS(nn.Module):
                 mask_bottom = torch.zeros_like(attn_weights, dtype=torch.bool)
                 mask_bottom[..., :heavy_budget] = True
             else:
-                mask_bottom = local_heavy_hitter_mask_nonoverlap(attn_weights, heavy_budget, recent_budget) # Default: No padding applied to input
+                mask_bottom = local_heavy_hitter_mask_nonoverlap(attn_weights, fixed_budget, heavy_budget, recent_budget) # Default: No padding applied to input
         else:
             mask_bottom = torch.zeros_like(attn_weights, dtype=torch.bool)
 
