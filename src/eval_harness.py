@@ -78,6 +78,7 @@ def parse_args():
     parser.add_argument('--enable_small_cache', action='store_true')
     parser.add_argument("--heavy_ratio", type=float, default=0.1)
     parser.add_argument("--recent_ratio", type=float, default=0.1)
+    parser.add_argument("--budget-config", type=str, default=None) # for budget config file, overrides other options
     parser.add_argument('--fix_heavy_to_initial_tokens', action='store_true')
     
     # Kernels
@@ -124,6 +125,30 @@ def main():
         else:
             path_func = lambda li: f'../checkpoints/{saved_model_name}/layer_{li}.pth'
             model = ENABLE_LESS_FUNCTIONS[args.model_arch](model, config, path_func)
+        
+        fallback_count = num_layers
+        if args.budget_config is not None:
+            budget_data = yaml.load(file, Loader=yaml.FullLoader)
+
+            assert args.model_arch.lower() in budget_data['model'], f"Model {args.model_arch} doesn't match contents of config."
+            assert model_size_name.lower() in budget_data['model'], f"Model size set to {model_size_name} doesn't match contents of config."
+
+            for name, module in reversed(model._modules.items()):
+                if isinstance(module, TARGET_MODULE[args.model_arch]):
+                    li = module.layer_idx
+                    if li == None:
+                        li = fallback_count - 1
+                        module.layer_idx = li
+                        fallback_count -= 1
+
+                    assert f'layer_{li}' in budget_data['layers'].keys(), f"Didn't find layer {li} in budget config when it was expected. " \
+                        + "Double check config and expected number of layers for model."
+
+                    module.fixed_budget = int(budget_data['layers'][f'layer_{li}']['fixed_budget']) * config.max_position_embeddings 
+                    module.heavy_budget = int(budget_data['layers'][f'layer_{li}']['heavy_budget']) * config.max_position_embeddings
+                    module.recent_budget = int(budget_data['layers'][f'layer_{li}']['recent_budget']) * config.max_position_embeddings
+    else:
+        ENABLE_FUNCTIONS, TARGET_MODULE = load_modules(False)
         
     model = model.half()
     model = model.eval().to(args.device)
