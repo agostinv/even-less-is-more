@@ -37,6 +37,7 @@ rouge==1.0.1
 rouge-score==0.1.2
 sacrebleu==2.4.0
 safetensors==0.4.2
+sentencepiece==0.2.0
 scikit-learn==1.4.0
 scipy==1.12.0
 sqlitedict==2.1.0
