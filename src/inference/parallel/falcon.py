@@ -21,7 +21,7 @@ __all__ = [
 
 
 class FalconAttentionSparse(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_idx=None):
         super().__init__()
 
         self.config = config
@@ -31,6 +31,8 @@ class FalconAttentionSparse(nn.Module):
         self.split_size = self.hidden_size
         self.hidden_dropout = config.hidden_dropout
         self.is_causal = True
+
+        self.layer_idx = layer_idx
 
         if self.head_dim * self.num_heads != self.hidden_size:
             raise ValueError(
@@ -62,6 +64,19 @@ class FalconAttentionSparse(nn.Module):
         self.fix_heavy_to_initial_tokens = config.fix_heavy_to_initial_tokens
         
     def _init_rope(self):
+        if self.config.rope_scaling is None:
+            rotary_emb = OldFalconRotaryEmbeddings(
+                self.head_dim,
+                base=self.config.rope_theta,
+                max_position_embeddings=self.config.max_position_embeddings,
+            )
+            return rotary_emb
+        else:
+            raise NotImplementedError("Non-RoPE scaling is not properly implemented in this repository's current state. "  + \
+                                        "This is essentially all due to needing to version bump to `transformers` v4.44.2 from " + \
+                                        "v4.35.2." \
+            )
+        
         if self.config.rope_scaling is None:
             rotary_emb = FalconRotaryEmbedding(
                 self.head_dim,
@@ -179,16 +194,18 @@ class FalconAttentionSparse(nn.Module):
         )
         value_layer = value_layer.transpose(1, 2).reshape(batch_size * num_kv_heads, query_length, self.head_dim)
 
-        past_kv_length = 0 if layer_past is None else layer_past[0].shape[1]
+        # doesn't do anything, had to disable for compatibility with transformers version
+        # past_kv_length = 0 if layer_past is None else layer_past[0].shape[1]
+        
         query_layer, key_layer = self.maybe_rotary(query_layer, key_layer, past_kv_length, position_ids)
 
+        # we'll use a dynamic cache to support the behavior we want
+        # original implementation in LESS, strangely, doesn't come with actually correct generative behavior
         if layer_past is not None:
-            past_key, past_value = layer_past
-            # concatenate along seq_length dimension:
-            #  - key: [batch_size * self.num_heads, kv_length, head_dim]
-            #  - value: [batch_size * self.num_heads, kv_length, head_dim]
-            key_layer = torch.cat((past_key, key_layer), dim=1)
-            value_layer = torch.cat((past_value, value_layer), dim=1)
+            if len(layer_past) == self.layer_idx:
+                layer_past.key_cache.append([])
+                layer_past.value_cache.append([])
+            key_layer, value_layer = layer_past.update(key_layer, value_layer, self.layer_idx)
 
         _, kv_length, _ = key_layer.shape
         if use_cache:
@@ -367,6 +384,19 @@ class FalconAttentionLESS(nn.Module):
 
     def _init_rope(self):
         if self.config.rope_scaling is None:
+            rotary_emb = OldFalconRotaryEmbeddings(
+                self.head_dim,
+                base=self.config.rope_theta,
+                max_position_embeddings=self.config.max_position_embeddings,
+            )
+            return rotary_emb
+        else:
+            raise NotImplementedError("Non-RoPE scaling is not properly implemented in this repository's current state. "  + \
+                                        "This is essentially all due to needing to version bump to `transformers` v4.44.2 from " + \
+                                        "v4.35.2." \
+            )
+        
+        if self.config.rope_scaling is None:
             rotary_emb = FalconRotaryEmbedding(
                 self.head_dim,
                 base=self.config.rope_theta,
@@ -483,16 +513,18 @@ class FalconAttentionLESS(nn.Module):
         )
         value_layer = value_layer.transpose(1, 2).reshape(batch_size * num_kv_heads, query_length, self.head_dim)
 
-        past_kv_length = 0 if layer_past is None else layer_past[0].shape[1]
+        # doesn't do anything, had to disable for compatibility with transformers version
+        # past_kv_length = 0 if layer_past is None else layer_past[0].shape[1]
+        
         query_layer, key_layer = self.maybe_rotary(query_layer, key_layer, past_kv_length, position_ids)
 
+        # we'll use a dynamic cache to support the behavior we want
+        # original implementation in LESS, strangely, doesn't come with actually correct generative behavior
         if layer_past is not None:
-            past_key, past_value = layer_past
-            # concatenate along seq_length dimension:
-            #  - key: [batch_size * self.num_heads, kv_length, head_dim]
-            #  - value: [batch_size * self.num_heads, kv_length, head_dim]
-            key_layer = torch.cat((past_key, key_layer), dim=1)
-            value_layer = torch.cat((past_value, value_layer), dim=1)
+            if len(layer_past) == self.layer_idx:
+                layer_past.key_cache.append([])
+                layer_past.value_cache.append([])
+            key_layer, value_layer = layer_past.update(key_layer, value_layer, self.layer_idx)
 
         _, kv_length, _ = key_layer.shape
         if use_cache:
@@ -620,7 +652,7 @@ def convert_kvcache_falcon_sparse(model, config):
                 model._modules[name] = change_class(module, config)
 
             if isinstance(module, FalconAttention):
-                model._modules[name] = FalconAttentionSparse(config)
+                model._modules[name] = FalconAttentionSparse(config, layer_idx=module.layer_idx)
 
         return model
 
@@ -637,7 +669,7 @@ def convert_kvcache_falcon_less(model, config, path_func):
                 model._modules[name] = change_class(module, config)
 
             if isinstance(module, FalconAttention):
-                model._modules[name] = FalconAttentionLESS(config)
+                model._modules[name] = FalconAttentionLESS(config, layer_idx=module.layer_idx)
 
         return model
     checkpoint = copy.deepcopy(model.state_dict())
@@ -656,3 +688,75 @@ def convert_kvcache_falcon_less(model, config, path_func):
 
     model.load_state_dict(checkpoint)
     return model.to(device)
+
+class OldFalconRotaryEmbeddings(nn.Module):
+    """Implementation of RotaryEmbedding from GPT-NeoX.
+    This implementation is designed to operate on queries and keys that are compatible with `[batch_size,
+    n_heads_per_partition, seq_len, head_dim]` (e.g. MinGPTAttention format).
+    """
+
+    def __init__(self, head_dim: int, base=10000, max_position_embeddings=2048):
+        super().__init__()
+        self.base = base
+        self.max_position_embeddings = max_position_embeddings
+        inv_freq = 1.0 / (self.base ** (torch.arange(0, head_dim, 2).float() / head_dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.head_dim = head_dim
+        self.seq_len_cached = -1
+        self.cos_cached: torch.Tensor | None = None
+        self.sin_cached: torch.Tensor | None = None
+
+    def _set_cos_sin_cache(self, seq_len, device, dtype):
+        self.seq_len_cached = seq_len
+        t = torch.arange(seq_len, device=device).to(dtype)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1).to(device)
+
+        if dtype in [torch.float16, torch.bfloat16]:
+            emb = emb.float()
+
+        self.cos_cached = emb.cos()
+        self.sin_cached = emb.sin()
+
+        self.cos_cached = self.cos_cached.type(dtype)
+        self.sin_cached = self.sin_cached.type(dtype)
+
+    def cos_sin(
+        self, seq_len: int, past_key_values_length: int, position_ids: torch.Tensor, device="cpu", dtype=torch.bfloat16
+    ) -> torch.Tensor:
+        total_length = seq_len + past_key_values_length
+        if total_length > self.seq_len_cached:
+            self._set_cos_sin_cache(total_length, device, dtype)
+
+        # the cached tensors need to update their devices (for example, after we change the model's device)
+        self.cos_cached = self.cos_cached.to(device)
+        self.sin_cached = self.sin_cached.to(device)
+
+        # Gather cos, sin at the designated position ids
+        cos = self.cos_cached[position_ids]  # [bs, seq_len, dim]
+        sin = self.sin_cached[position_ids]  # [bs, seq_len, dim]
+        return cos, sin
+
+    def forward(self, query, key, past_key_values_length, position_ids):
+        _, seq_len, _ = query.shape
+        cos, sin = self.cos_sin(seq_len, past_key_values_length, position_ids, query.device, query.dtype)
+        # Query and key's shapes are [bs * num_heads, seq_len, dim], might need manual expansion. Ifs and elses used to
+        # avoid unnecessary repeat_interleave operations.
+        query_expansion_factor = int(query.shape[0] / cos.shape[0])
+        if query_expansion_factor > 1:
+            query_cos = torch.repeat_interleave(cos, query_expansion_factor, dim=0)
+            query_sin = torch.repeat_interleave(sin, query_expansion_factor, dim=0)
+        else:
+            query_cos, query_sin = cos, sin
+
+        key_expansion_factor = int(key.shape[0] / cos.shape[0])
+        if key_expansion_factor > 1:
+            if key_expansion_factor != query_expansion_factor:
+                key_cos = torch.repeat_interleave(cos, key_expansion_factor, dim=0)
+                key_sin = torch.repeat_interleave(sin, key_expansion_factor, dim=0)
+            else:
+                key_cos, key_sin = query_cos, query_sin
+        else:
+            key_cos, key_sin = cos, sin
+
+        return (query * query_cos) + (rotate_half(query) * query_sin), (key * key_cos) + (rotate_half(key) * key_sin)

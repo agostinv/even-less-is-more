@@ -109,7 +109,8 @@ def main():
     config = AutoConfig.from_pretrained(model_name, cache_dir=args.cache_dir)
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=False, cache_dir=args.cache_dir)
     model = AutoModelForCausalLM.from_pretrained(model_name, cache_dir=args.cache_dir)
-
+    
+    num_layers = config.num_hidden_layers
     
     if args.enable_small_cache:
         print('Enable Small Cache Size')
