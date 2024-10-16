@@ -227,6 +227,7 @@ def main():
             else:
                 seq_len = len(input_ids[0])
                 print(f"Sequence length: {seq_len}", flush=True)
+
                 # attention_mask = torch.tril(torch.ones(1, seq_len), diagonal=0).to(model.device)
                 # attention_mask = torch.tril(torch.ones(seq_len, seq_len), diagonal=0).to(model.device)
 
