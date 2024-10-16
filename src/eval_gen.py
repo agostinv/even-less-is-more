@@ -131,9 +131,9 @@ def main():
 
     model_size_name = models_sizes_dict[args.model_arch][args.model_size]
 
-    config = AutoConfig.from_pretrained(hugging_name_dict[args.model_arch](model_size_name), cache_dir=args.cache_dir)
+    config = AutoConfig.from_pretrained(hugging_name_dict[args.model_arch](model_size_name), cache_dir=args.cache_dir, attn_implementation="eager")
     tokenizer = AutoTokenizer.from_pretrained(hugging_name_dict[args.model_arch](model_size_name), use_fast=True, cache_dir=args.cache_dir)
-    model = AutoModelForCausalLM.from_pretrained(hugging_name_dict[args.model_arch](model_size_name))
+    model = AutoModelForCausalLM.from_pretrained(hugging_name_dict[args.model_arch](model_size_name), attn_implementation="eager")
     
     num_layers = config.num_hidden_layers
     
@@ -226,14 +226,12 @@ def main():
 
             else:
                 seq_len = len(input_ids[0])
-                print(f"Sequence length: {seq_len}")
+                print(f"Sequence length: {seq_len}", flush=True)
                 # attention_mask = torch.tril(torch.ones(1, seq_len), diagonal=0).to(model.device)
                 # attention_mask = torch.tril(torch.ones(seq_len, seq_len), diagonal=0).to(model.device)
 
                 # turn off automatic cache behavior for transformers if we enable a small cache
                 # needed to support version bump from transformers v4.35.2 to v4.44.2
-                # purely causal construction, attention mask seems to cause issue when provided to generate
-                # so we will deal with it in the customized attention passes ourselves
                 output_sequences = model.generate(
                     input_ids=input_ids,
                     max_length=max_tokens + len(input_ids[0]),
@@ -246,8 +244,6 @@ def main():
                     output_scores=True,
                     use_cache=True,
                     attention_mask=attention_mask,
-                    # top_k=args.k,
-                    # use_cache=(not args.enable_small_cache),
                 )
 
                 for name, m in model.named_modules():
@@ -286,10 +282,10 @@ def main():
                 }
                 
                 results.append(result)
-                print('rouge-1: {:.6f}, rouge-2: {:.6f}, rouge-l: {:.6f}'.format(np.mean(rouge1_score_list), np.mean(rouge2_score_list), np.mean(rougel_score_list)))
+                print('rouge-1: {:.6f}, rouge-2: {:.6f}, rouge-l: {:.6f}'.format(np.mean(rouge1_score_list), np.mean(rouge2_score_list), np.mean(rougel_score_list)), flush=True)
     
-    print("FINAL RESULTS")
-    print('rouge-1: {:.6f}, rouge-2: {:.6f}, rouge-l: {:.6f}'.format(np.mean(rouge1_score_list), np.mean(rouge2_score_list), np.mean(rougel_score_list)))
+    print("FINAL RESULTS", flush=True)
+    print('rouge-1: {:.6f}, rouge-2: {:.6f}, rouge-l: {:.6f}'.format(np.mean(rouge1_score_list), np.mean(rouge2_score_list), np.mean(rougel_score_list)), flush=True)
 
 if __name__ == "__main__":
     main()
