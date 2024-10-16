@@ -18,7 +18,7 @@ __all__ = ['convert_kvcache_llama_sparse', 'LlamaAttentionSparse', 'convert_kvca
 class LlamaAttentionSparse(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: LlamaConfig, layer_idx=None):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -64,6 +64,7 @@ class LlamaAttentionSparse(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
         assert bsz == 1
@@ -86,9 +87,9 @@ class LlamaAttentionSparse(nn.Module):
 
         if past_key_value is not None:
             if len(past_key_value) == self.layer_idx:
-                layer_past.key_cache.append([])
-                layer_past.value_cache.append([])
-            key_layer, value_layer = layer_past.update(key_layer, value_layer, self.layer_idx)
+                past_key_value.key_cache.append([])
+                past_key_value.value_cache.append([])
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx)
         
         # if past_key_value is not None:
         #     # reuse k, v, self_attention
@@ -104,6 +105,9 @@ class LlamaAttentionSparse(nn.Module):
                 f" {attn_weights.size()}"
             )
 
+        if attention_mask is None:
+            attention_mask = torch.triu(torch.ones((bsz, 1, q_len, kv_seq_len)), diagonal=(1 + self.past_kv_length)).to(attn_weights.device) * -1e3
+
         if attention_mask is not None:
             if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
                 raise ValueError(
@@ -112,7 +116,6 @@ class LlamaAttentionSparse(nn.Module):
             attn_weights = attn_weights + attention_mask
             attn_weights = torch.max(attn_weights, torch.tensor(torch.finfo(attn_weights.dtype).min))
 
-        
         if self.attention_masks_next is not None:
             attn_weights = attn_weights * self.attention_masks_next + (1 - self.attention_masks_next) * torch.finfo(attn_weights.dtype).min
 
@@ -174,6 +177,7 @@ class LlamaAttentionSparse(nn.Module):
         if not output_attentions:
             attn_weights = None
         
+        self.past_kv_length += q_len
         return attn_output, attn_weights, past_key_value
 
 
@@ -181,7 +185,7 @@ class LlamaAttentionSparse(nn.Module):
 class LlamaAttentionLESS(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: LlamaConfig, layer_idx=None):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -261,6 +265,7 @@ class LlamaAttentionLESS(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
+        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
         assert bsz == 1
@@ -414,6 +419,7 @@ class LlamaAttentionLESS(nn.Module):
         if not output_attentions:
             attn_weights = None
 
+        self.past_kv_length += q_len
         return attn_output, attn_weights, past_key_value
 
 
@@ -425,7 +431,7 @@ def convert_kvcache_llama_sparse(model, config):
                 model._modules[name] = change_class(module, config)
 
             if isinstance(module, LlamaAttention):
-                model._modules[name] = LlamaAttentionSparse(config)
+                model._modules[name] = LlamaAttentionSparse(config, layer_idx=module.layer_idx)
 
         return model
     checkpoint = copy.deepcopy(model.state_dict())
@@ -441,7 +447,7 @@ def convert_kvcache_llama_less(model, config, path_func):
                 model._modules[name] = change_class(module, config)
 
             if isinstance(module, LlamaAttention):
-                model._modules[name] = LlamaAttentionLESS(config)
+                model._modules[name] = LlamaAttentionLESS(config, layer_idx=module.layer_idx)
 
         return model
     checkpoint = copy.deepcopy(model.state_dict())
