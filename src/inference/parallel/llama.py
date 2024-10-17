@@ -125,7 +125,7 @@ class LlamaAttentionSparse(nn.Module):
 
         del ones, key_states, hidden_states
         torch.cuda.empty_cache()
-        attn_weights[~mask_bottom] = 1e-6 # torch.min(attention_mask)
+        attn_weights[~mask_bottom] = -999 # torch.min(attention_mask)
         del mask_bottom
         torch.cuda.empty_cache()
 
