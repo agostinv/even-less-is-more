@@ -193,7 +193,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--attention-score-decay', type=float, default=1.0) # enables attention accumulation decay
 
-    parser.add_argument('--kernel-fn', type=str, choices=["LESS", "Hedgehog", "Dijiang"], default="LESS")
+    parser.add_argument('--kernel-fn', type=str, choices=["LESS", "Softmax-Test", "Hedgehog", "Dijiang"], default="LESS")
 
     args = parser.parse_args()
 

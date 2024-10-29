@@ -15,6 +15,7 @@ from masks import get_A_mask, get_h2o_mask, get_lambda_mask_sparse, get_eviction
     - time-data-dependent lambda gating, dependent on FLA
 
     In terms of kernel functions, the one proposed in LESS is maintained and we extend to:
+    - Softmax-Test (for roofline testing)
     - Hedgehog (in progress)
     - Dijiang (in progress)
 '''
@@ -35,7 +36,7 @@ class KernelizedHeadAttention(nn.Module):
         print(f"Kernel dimension: {self.dim_ker}")
         print(f"Kernel function: {self.kernel_fn}")
        
-        if self.kernel_fn == "LESS":
+        if self.kernel_fn == "LESS" or self.kernel_fn == "Softmax-Test":
             # MLP Layer 1
             a = math.sqrt(6/(dim_head + dim_hid))
             self.kernel_q_mat1 = torch.nn.init.uniform_(torch.empty(num_heads, dim_head, dim_hid), a=-a, b=a)
@@ -76,26 +77,27 @@ class KernelizedHeadAttention(nn.Module):
         
         elif self.kernel_fn == "Hedgehog":
             # account for dimension concatenation at end instead of abs
-            dim_ker = dim_ker // 2
+            dim_hid1 = dim_hid // 2
+            dim_hid2 = dim_hid
 
-            a = math.sqrt(6/(dim_head + dim_hid))
-            self.kernel_q_mat1 = torch.nn.init.uniform_(torch.empty(num_heads, dim_head, dim_hid), a=-a, b=a)
+            a = math.sqrt(6/(dim_head + dim_hid1))
+            self.kernel_q_mat1 = torch.nn.init.uniform_(torch.empty(num_heads, dim_head, dim_hid1), a=-a, b=a)
             self.kernel_q_mat1 = nn.Parameter(self.kernel_q_mat1, requires_grad=True)
             if not self.multi_query:
-                self.kernel_k_mat1 = torch.nn.init.uniform_(torch.empty(num_heads, dim_head, dim_hid), a=-a, b=a)
+                self.kernel_k_mat1 = torch.nn.init.uniform_(torch.empty(num_heads, dim_head, dim_hid1), a=-a, b=a)
                 self.kernel_k_mat1 = nn.Parameter(self.kernel_k_mat1, requires_grad=True)
             else:
-                self.kernel_k_mat1 = nn.Linear(dim_head, dim_hid, bias=False)
+                self.kernel_k_mat1 = nn.Linear(dim_head, dim_hid1, bias=False)
             
             # step down
-            a = math.sqrt(6/(dim_ker // 2 + dim_hid))
-            self.kernel_q_mat2 = torch.nn.init.uniform_(torch.empty(num_heads, dim_hid, dim_ker), a=-a, b=a)
+            a = math.sqrt(6/(dim_ker // 2 + dim_hid2))
+            self.kernel_q_mat2 = torch.nn.init.uniform_(torch.empty(num_heads, dim_hid2, dim_ker), a=-a, b=a)
             self.kernel_q_mat2 = nn.Parameter(self.kernel_q_mat2, requires_grad=True)
             if not self.multi_query:
-                self.kernel_k_mat2 = torch.nn.init.uniform_(torch.empty(num_heads, dim_hid, dim_ker), a=-a, b=a)
+                self.kernel_k_mat2 = torch.nn.init.uniform_(torch.empty(num_heads, dim_hid2, dim_ker), a=-a, b=a)
                 self.kernel_k_mat2 = nn.Parameter(self.kernel_k_mat2, requires_grad=True)
             else:
-                self.kernel_k_mat2 = nn.Linear(dim_hid, dim_ker, bias=False)
+                self.kernel_k_mat2 = nn.Linear(dim_hid2, dim_ker, bias=False)
             
             # MLP Layer 3 (keys only)
             a = math.sqrt(6/(2 * dim_ker))
@@ -111,8 +113,8 @@ class KernelizedHeadAttention(nn.Module):
             self.scalingD = nn.Parameter(torch.ones(1, num_heads, 1, dim_ker) * 1e-4, requires_grad=True)
             self.scalingD2 = nn.Parameter(torch.ones(1, num_heads, 1, dim_ker) * 1e-4, requires_grad=True)
             
-            self.act = F.tanh
-            self.kernel_f = torch.exp
+            self.act = F.softmax
+            self.kernel_f = F.relu
 
         elif self.kernel_fn == "Dijiang":
             raise NotImplementedError
@@ -237,16 +239,29 @@ class KernelizedHeadAttention(nn.Module):
         else:
             out = torch.matmul(q, k.transpose(2, 3)) # B, H, S, S
             
+            # attn weight decay based on lambda, otherwise normal lr mask
             if decay_mask is not None:
                 out = decay_mask * out
             else:
                 out = lr_attn_mask * out
 
-            lr_norms_lse = torch.log(out.sum(dim=-1, keepdim=True) + 1e-6)
-            norm_factor_lse = torch.logaddexp(lr_norms_lse, sparse_norms_lse)
-            out = (torch.log(out + 1e-6) * lr_attn_mask) + ((~lr_attn_mask) * sparse_attn_weights)
-            out = torch.exp(out - norm_factor_lse)
-            out = torch.matmul(out, v).transpose(1, 2).flatten(2)
+            if self.kernel_fn == "Softmax-Test":
+                out = out + ((~lr_attn_mask) * -999)
+                weights = out
+                out = F.softmax(out, dim=-1)
+                lr_norms_lse = torch.logsumexp(weights, -1, keepdim=True)
+                
+                norm_factor_lse = torch.logaddexp(lr_norms_lse, sparse_norms_lse)
+                breakpoint()
+                out = (torch.log(out + 1e-6) * lr_attn_mask) + ((~lr_attn_mask) * sparse_attn_weights)
+                out = torch.exp(out - norm_factor_lse)
+                out = torch.matmul(out, v).transpose(1, 2).flatten(2)
+            else:
+                lr_norms_lse = torch.log(out.sum(dim=-1, keepdim=True) + 1e-6)
+                norm_factor_lse = torch.logaddexp(lr_norms_lse, sparse_norms_lse)
+                out = (torch.log(out + 1e-6) * lr_attn_mask) + ((~lr_attn_mask) * sparse_attn_weights)
+                out = torch.exp(out - norm_factor_lse)
+                out = torch.matmul(out, v).transpose(1, 2).flatten(2)
 
         return out
 
@@ -339,7 +354,7 @@ class KernelizedHeadAttention(nn.Module):
         B, S, D = q.shape
         H = self.num_heads
         
-        if self.kernel_fn == "LESS":
+        if self.kernel_fn == "LESS" or self.kernel_fn == "Softmax-Test":
             q = q.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
             if not self.multi_query:
                 k = k.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
@@ -347,18 +362,31 @@ class KernelizedHeadAttention(nn.Module):
                 k = k.unsqueeze(1)
  
             q = self.act(self.dropout(torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat1)))
-            q = self.kernel_f(torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat2))
-            q = q.abs()
+            q = torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat2)
 
-            if not self.multi_query:
-                k = self.act(self.dropout(torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat1)))
-                k = torch.abs(self.scalingD) * self.kernel_f(torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat2))
-                k = k + torch.einsum('bhsd,hde->bhse', k, self.interaction_k) * self.scalingD2
-            else:
-                k = self.act(self.dropout(self.kernel_k_mat1(k)))
-                k = torch.abs(self.scalingD) * self.kernel_f(self.kernel_k_mat2(k))
-                k = k + self.interaction_k(k) * self.scalingD2
-            k = k.abs()
+            if self.kernel_fn == "LESS":
+                if not self.multi_query:
+                    k = self.act(self.dropout(torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat1)))
+                    k = torch.abs(self.scalingD) * self.kernel_f(torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat2))
+                    k = k + torch.einsum('bhsd,hde->bhse', k, self.interaction_k) * self.scalingD2
+                else:
+                    k = self.act(self.dropout(self.kernel_k_mat1(k)))
+                    k = torch.abs(self.scalingD) * self.kernel_f(self.kernel_k_mat2(k))
+                    k = k + self.interaction_k(k) * self.scalingD2
+            
+                q = self.kernel_f(q).abs()
+                k = k.abs()
+
+            else: # Softmax-Test, don't need to guarantee positivity or have last q activation
+                if not self.multi_query:
+                    k = self.act(self.dropout(torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat1)))
+                    k = self.scalingD * self.kernel_f(torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat2))
+                    k = k + torch.einsum('bhsd,hde->bhse', k, self.interaction_k) * self.scalingD2
+                else:
+                    k = self.act(self.dropout(self.kernel_k_mat1(k)))
+                    k = self.scalingD * self.kernel_f(self.kernel_k_mat2(k))
+                    k = k + self.interaction_k(k) * self.scalingD2
+
 
         elif self.kernel_fn == "Hedgehog":
             q = q.reshape(B, S, self.num_heads, D // self.num_heads).transpose(1, 2)
@@ -367,20 +395,23 @@ class KernelizedHeadAttention(nn.Module):
             else:
                 k = k.unsqueeze(1)
             
-            q = self.act(self.dropout(torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat1)))
+            q = self.dropout(torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat1))
+            q = self.act(torch.cat((q, -q), dim=-1), dim=-1)
             q = torch.einsum('bhsd,hde->bhse', q, self.kernel_q_mat2)
-            q = self.kernel_f(torch.cat((q, -q), dim=-1))
+            q = self.kernel_f(q)
 
             if not self.multi_query:
-                k = self.act(self.dropout(torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat1)))
+                k = self.dropout(torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat1))
+                k = self.act(torch.cat((k, -k), dim=-1), dim=-1)
                 k = torch.abs(self.scalingD) * torch.einsum('bhsd,hde->bhse', k, self.kernel_k_mat2)
                 k = k + torch.einsum('bhsd,hde->bhse', k, self.interaction_k) * self.scalingD2
             else:
-                k = self.act(self.dropout(self.kernel_k_mat1(k)))
+                k = self.dropout(self.kernel_k_mat1(k))
+                k = self.act(torch.cat((k, -k), dim=-1), dim=-1)
                 k = torch.abs(self.scalingD) * self.kernel_k_mat2(k)
                 k = k + self.interaction_k(k) * self.scalingD2
-            k = self.kernel_f(torch.cat((k, -k), dim=-1))
-            
+            k = self.kernel_f(k)
+
         elif self.kernel_fn == "Dijiang":
             raise NotImplementedError
         
