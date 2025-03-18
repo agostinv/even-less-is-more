@@ -4,11 +4,14 @@ Project based on LESS from ICML '24, which augments LLMs with a small fine-tunin
 
 Their global cache is a form of linear attention, where the softmax operator is replaced with some arbitrary, decomposable set of function maps/kernels. This allows for, at a high level, Q(K^TV) which is O(n) versus (QK^T)V which is O(n^2). 
 
+> [!NOTE]  
+> This project is not being actively worked on due to limited visible improvements. Some commits in the latest few branches were focused on varying resource allocation and trying to gather some standardized results for [Hedgehog](https://github.com/fla-org/flash-linear-attention/blob/main/fla/modules/feature_map.py#L38) and [Dijiang](https://github.com/YuchuanTian/DiJiang)-like feature maps. This repo does feature [Flash Linear Attention](https://github.com/fla-org/flash-linear-attention/tree/c805d79a07714b85b29b72a0d0eab77709fbb641) integration, a repository full of performant Triton implementations of linear attention kernels, and there were some improvements observed when employing [Gated Linear Attention](https://github.com/fla-org/flash-linear-attention/blob/c805d79a07714b85b29b72a0d0eab77709fbb641/fla/layers/gla.py#L25), so further investigations should probably begin there.
+
 ## Room for Improvement with Even Less?
 
 #### Linear Attention Gating/Decay
 
-A few areas leap out for improvement. First, and foremost, their global cache is a naive "value mush" with no way to modify itself. The creators of LESS appeared to not know how to parallelize their cache construction when it needs to be modified at a per time-step basis, but in reality it should be relatively simple for all but the most data-dependent of gating functions/decay factors.
+A few areas leap out for improvement. First, and foremost, their global cache is a naive "value mush" with no way to modify itself. The creators of LESS did not explore parallelization of their cache construction when it needs to be modified at a per time-step basis, but in reality it should be relatively simple for all but the most data-dependent of gating functions/decay factors.
 
 Any function producing a scalar G that gates the KV cache updates in some fashion and decays it can be trivially be shown to be equivalent to a modified ALiBi-like structure, where G is placed in a mask with each i and j defining a G value as G^(-1(j-i)). This also applies even if G is time-dependent, e.g. some arbitrary G\_t.
 
@@ -26,11 +29,11 @@ Some works, including LeaPformer from ICML '24, demonstrated improvements can be
 
 #### Replacing K^TV Denominator with LayerNorm
 
-In an ACL '22 work it was demonstrated that linear attention has unbounded gradients. While this replacement doesn't necessarily lead to a practical improvement, it is a principled change.
+In an ACL '22 work it was demonstrated that linear attention has unbounded gradients. While this replacement doesn't necessarily lead to a practical improvement, it is a principled change. This is admittedly rendered more complicated by the distillation goal + this attention mechanism being hybridized.
 
 #### QAT-like Robustness Training
 
-LESS proposes only training the feature maps on a per-layer basis to minimize the memory footprint of the model as it's being trained, thus improving accessibility. An optional improvement would likely be layer-by-layer training, inspired by QAT approaches. This is probably complementary to their existing approach, which seeks to minimize layer-by-layer outputs in an incremental manner. Instead, a QAT augmentation would progressively freeze layers while training on model output reconstruction.
+LESS proposes only training the feature maps on a per-layer basis to minimize the memory footprint of the model as it's being trained, thus improving accessibility. An optional improvement would likely be progressive layer-by-layer training, inspired by QAT approaches. This is probably complementary to their existing approach, which seeks to minimize layer-by-layer outputs in an incremental manner. Instead, a QAT augmentation might progressively freeze layers while training on overall model output reconstruction.
 
 ### Usage
 
