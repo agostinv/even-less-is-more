@@ -1,6 +1,6 @@
 # Even-LESS is More!
 
-Project based on LESS from ICML '24, which augments LLMs with a small fine-tuning flow to provide a constant memory footprint. Their proposed approach is valid for any "memory eviction policy" in the KV cache, although they primarily use H2O from NeurIPS '23. 
+Project based on [LESS](https://proceedings.mlr.press/v235/dong24f.html) from ICML '24, which augments LLMs with a small fine-tuning flow to provide a constant memory footprint. Their proposed approach is valid for any "memory eviction policy" in the KV cache, although they primarily use H2O from NeurIPS '23. 
 
 Their global cache is a form of linear attention, where the softmax operator is replaced with some arbitrary, decomposable set of function maps/kernels. This allows for, at a high level, Q(K^TV) which is O(n) versus (QK^T)V which is O(n^2). 
 
